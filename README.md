@@ -9,11 +9,13 @@
 
 内置设置面板，便于在群组内直接控制机器人各项功能。
 
-本项目基于 [telegram_private_chatbot](https://github.com/jikssha/telegram_private_chatbot) ，进行了部分功能修改，并更新完善配置教程。  
+本项目基于 [telegram_private_chatbot](https://github.com/jikssha/telegram_private_chatbot) ，进行了大幅修改，并更新保姆级部署教程。  
 在此对原项目作者 [Vaghr](https://github.com/jikssha) 以及我的好兄弟 打钱 & 逆天 表示特别感谢！
 
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/mole404/NextGenForward?tab=MIT-1-ov-file)
 [![Telegram](https://img.shields.io/badge/Telegram-DM-blue?style=social&logo=telegram)](https://t.me/Arona_Chat_Bot) 
+
+界面演示：
 
 <img width="652" height="656" alt="界面示例" src="https://github.com/user-attachments/assets/bd89d509-fdef-4376-b1dd-59eec5911834" />
 
@@ -69,13 +71,13 @@
 
 ## 📝 前期准备
 
-1.  **Cloudflare账号**：请提前注册或登录 Cloudflare 账号，并将 Cloudflare 页面设置为中文。
+1.  **Cloudflare账号（免费注册）**：请提前注册或登录 Cloudflare 账号，并将 Cloudflare 页面设置为中文。
 
-2.  **Telegram Bot**：在 [@BotFather](https://t.me/BotFather) 创建一个机器人，获取 Token。
+2.  **Telegram Bot（免费申请）**：在 [@BotFather](https://t.me/BotFather) 创建一个机器人，获取 Token。
     * ⚠️请务必保管好自己的 Token，确保不要泄露给其他人。
     * 重要设置：选择机器人，在 Bot Setting 中关闭 **Group Privacy**。
 
-3.  **管理员群组**：创建一个 Telegram 群组，并 **开启话题功能 (Topics)**。
+3.  **管理员群组（免费创建）**：创建一个 Telegram 群组，并 **开启话题功能 (Topics)**。
     * 将机器人拉入群组，并 **设为管理员**，务必给予管理员机器人**管理话题权限**。
     * 获取群组`SUPERGROUP_ID`，在 Telegram 桌面端右键群内任意消息，复制链接，链接里会有一段 xxxxxxxxxx 数字，在前面加上 -100 就是完整的`SUPERGROUP_ID`，例如 -100xxxxxxxxxx。
 
@@ -93,21 +95,21 @@
 4.  点击页面中的 **创建应用程序**
 5.  选择 **Connect Github**
 6.  在弹出的页面中授权 Cloudflare 访问您的 GitHub Repository 完成仓库关联
-7.  选择 **Continue with Github**，选择您刚才 Fork 的 `tg-private-chatbot` 仓库，点击下一步
+7.  选择 **Continue with Github**，选择您刚才 Fork 的 `NextGenForward` 仓库，点击下一步
 8.  **Set up your application**：
-    * 项目名称：`tg-private-chatbot` (或任意名称)
+    * 项目名称：`nextgenforward` (或任意名称)
     * 其他配置保持默认
     * 点击 **部署**，等待部署完成
   
 ### 部署方法 2：手动复制 worker.js 代码部署
 
-如果您不想关联 GitHub，可以直接复制本项目仓库中的 worker.js 代码部署，此方法后期将需要手动更新代码，无法实现自动更新。
+如果您不想关联 GitHub，可以直接复制本项目仓库中的 worker.js 代码部署，此方法后期将需要手动实现更新。
 
 1.  登录 [Cloudflare Dashboard](https://dash.cloudflare.com/)
 2.  选择控制台左侧 **计算和 AI** -> **Workers 和 Pages**
 3.  点击页面中的 **创建应用程序**
 4.  选择 **从 Hello World! 开始**
-5.  编辑 **Worker name**：`tg-private-chatbot` (或任意名称)
+5.  编辑 **Worker name**：`nextgenforward` (或任意名称)
 5.  点击 **部署**，等待部署完成
 6.  点击 Cloudflare 当前 Worker 页面右上角的 **编辑代码**
 7.  删除所有代码，复制并粘贴本 Github 项目仓库中 **worker.js** 文件的所有代码
@@ -117,15 +119,15 @@
 
 当您使用以上两种方法的任意一种完成部署后，您可以在 Worker 的 **概述** 页面查看您的 **Worker 域名**  
 * 格式为 `your-worker-name.your-subdomain.workers.dev`  
-* 例如 `tg-private-chatbot.xxxxxx.workers.dev`
+* 例如 `nextgenforward.xxxxxx.workers.dev`
 
-💡**这个域名之后会用到**
+💡**您的域名之后会用到**
 
 ---
 
 ## 🔗 关联和绑定
 
-### 创建并绑定 KV 命名空间
+### 必要步骤 1：创建并绑定 KV 命名空间
 
 无论您使用以上哪种方法完成部署，都必须绑定 KV 命名空间，否则项目将无法运行。
 
@@ -134,62 +136,97 @@
 3. 命名空间名称填写`TOPIC_MAP`，点击 **创建** ，等待创建完成
 4. 选择控制台左侧 **计算和 AI** -> **Workers 和 Pages**
 5. 点击进入您刚才部署的 Worker 页面，注意 **不要点击到 Worker 域名**
-6. 进入 Worker 的 **绑定** 页面 -> **添加绑定** -> **KV 命名空间** -> **添加绑定**
-7. 变量名称 **必须** 填写`TOPIC_MAP`，KV 命名空间选择刚才创建的`TOPIC_MAP`命名空间，**添加绑定**
+6. 进入 Worker 的 **绑定** 页面 -> **添加绑定** -> 选择左侧的 **KV 命名空间** -> **添加绑定**
+7. 变量名称 **必须** 填写`TOPIC_MAP`，KV 命名空间选择您刚才创建的`TOPIC_MAP`命名空间，点击 **添加绑定**
+8. 绑定完成
 
 
 
-### 设置 Cloudflare Turnstile
+### 必要步骤 2：添加环境变量
 
-无论您使用以上哪种方法完成部署，都必须设置 Cloudflare Turnstile，否则项目将无法运行。
+无论您使用以上哪种方法完成部署，都必须添加环境变量，否则项目将无法运行。
 
-1. 首先复制您的 Worker 域名，例如 `tg-private-chatbot.xxxxxx.workers.dev`
+1. 选择控制台左侧 **计算和 AI** -> **Workers 和 Pages**
+2. 点击进入您刚才部署的 Worker，注意 **不要点击到 Worker 域名**
+3. 进入 Worker 的 **设置** 页面，找到 **变量和机密**
+4. **添加** 以下环境变量，一般变量设置为 **文本**，加密变量推荐设置为 **密钥**，可选变量按需设置
+   
+| 必须设置的变量 | 值 | 说明 |
+| :--- | :--- | :--- |
+| `BOT_TOKEN` | 您的机器人Token | 加密 |
+| `SUPERGROUP_ID` | -100xxxxxxxxxx |  |
+
+
+| 可选变量 | 值 | 说明 |
+| :--- | :--- | :--- |
+| `WORKER_URL` | 例如`https://nextgenforward.xxxxxx.workers.dev` | **若需使用 Cloudflare 人机验证<br>则此变量必须设置** |
+| `CF_TURNSTILE_SITE_KEY` | 您的 site_key | **若需使用 Cloudflare 人机验证<br>则此变量必须设置** |
+| `CF_TURNSTILE_SECRET_KEY` | 您的 secret_key | **加密<br>若需使用 Cloudflare 人机验证<br>则此变量必须设置** |
+| `WEBHOOK_SECRET` | 自定义随机组合 | 支持`A-Z` `a-z` `0-9` `_` `-`字符组合<br>使用其它字符会出错<br>设置此变量可提高 Webhook 安全性 |
+| `ADMIN_IDS` | 群组管理员TG用户ID 和 您机器人的TG用户ID，例如：123456789,987654321 | 可使用 [@userinfobot](https://t.me/userinfobot) 查看<br>多个ID之间使用英文逗号连接<br>**当您群组内存在多位管理员时，您可通过此变量来控制管理员指令的使用权** |
+| `API_BASE` | `https://api.telegram.org` | 缺省默认就是这个，可忽略 |
+
+
+
+### 可选配置 1：设置 Cloudflare Turnstile
+
+Cloudflare Turnstile 人机验证为可选配置，只有当您完成以下配置，并添加`WORKER_URL` `CF_TURNSTILE_SITE_KEY`和`CF_TURNSTILE_SECRET_KEY`**所有三个**环境变量之后才可以使用。  
+机器人**默认为本地题库验证**方案，配置完成后请在群组内使用`/settings`命令通过设置面板切换为 Cloudflare 验证。
+
+1. 首先复制您的 Worker 域名，例如 `nextgenforward.xxxxxx.workers.dev`
 2. 选择控制台左侧 **应用程序安全** -> **Turnstile**
 3. 点击 **添加小组件** ，设置任意小组件名称
 4. 点击 **添加主机名** ，在 **添加自定义主机名** 中粘贴您的 Worker 域名（注意这里的域名**不要带`https://`开头和`/`结尾**），点击右侧 **添加**
 5. 在下方 **所选主机名**中 **勾选**您刚添加的 Worker 域名，点击底部 **添加**
 6. 再次在 **主机名**下勾选您刚添加的 Worker 域名，**小组件模式**选择 **托管**，**预先许可**选择**否**
 7. 点击页面最右下角 **创建**
-8. 创建完成后页面会显示您的 **站点密钥（site_key）**，和您的 **密钥（secret_key）**，稍后的步骤中会使用这两个密钥
+8. 创建完成后页面会显示您的 **站点密钥（site_key）**，和您的 **密钥（secret_key）**，分别对应您的`CF_TURNSTILE_SITE_KEY`和`CF_TURNSTILE_SECRET_KEY`两个变量
 
 ⚠️请务必保管好自己的密钥，确保不要泄露给其他人。
-   
 
 
-### 添加环境变量
+### 可选配置 2：绑定 Cloudflare Workers AI
 
-无论您使用以上哪种方法完成部署，都必须添加环境变量，否则项目将无法运行。
+使用 Workers AI 作为垃圾消息识别兜底，此项为可选配置。  
+机器人**默认为本地规则识别方案**，当您完成以下配置，机器人会自动启用 AI 进行兜底识别，变为 **本地规则 + AI 识别兜底**。
 
 1. 选择控制台左侧 **计算和 AI** -> **Workers 和 Pages**
-2. 点击进入您刚才部署的 Worker，注意 **不要点击到 Worker 域名**
-3. 进入 Worker 的 **设置** 页面 -> **变量和机密**
-4. **添加** 以下环境变量（一般变量设置为 **文本**，加密变量设置为 **密钥**，可选变量可忽略不设）
-   
-| 必须设置的变量 | 值 | 说明 |
-| :--- | :--- | :--- |
-| `BOT_TOKEN` | 您的机器人Token | 加密 |
-| `SUPERGROUP_ID` | -100xxxxxxxxxx |  |
-| `CF_TURNSTILE_SITE_KEY` | 您的 site_key |  |
-| `CF_TURNSTILE_SECRET_KEY` | 您的 secret_key | 加密 |
-| `WORKER_URL` | `https://tg-private-chatbot.xxxxxx.workers.dev` |  |
-| `ADMIN_IDS` | 您自己的TG用户ID和您机器人的TG用户ID，例如：<br>123456789,987654321 | 可使用 [@userinfobot](https://t.me/userinfobot) 查看<br>多个ID之间使用英文逗号连接 |
+2. 点击进入您刚才部署的 Worker 页面，注意 **不要点击到 Worker 域名**
+3. 进入 Worker 的 **绑定** 页面 -> **添加绑定** -> 选择左侧的 **Workers AI** -> **添加绑定**
+4. 变量名称 **必须** 填写`AI`，点击 **添加绑定**
+5. 绑定完成
 
-| 可选变量 | 值 | 说明 |
-| :--- | :--- | :--- |
-| `API_BASE` | `https://api.telegram.org` | 缺省默认就是这个，可忽略 |
-
+💡本项目代码中默认使用的 Workers AI 模型为`@cf/meta/llama-3.1-8b-instruct-fast`  
+如果您希望更换为其他 AI 模型，或调整识别灵敏度，可手动编辑项目代码中第 202 - 206 行的
+```
+  ai: {
+    enabled: true,
+    model: "@cf/meta/llama-3.1-8b-instruct-fast",
+    threshold: 0.85
+  }
+```
+编辑完成后重新部署即可自动生效。
 
 
-### 最后一步：激活 Webhook 
+### 最后一步（关键）：激活 Webhook 
 
 无论您使用以上哪种方法完成部署，都必须激活 Webhook，否则项目将无法运行。
 
 **直接使用浏览器访问网址激活 Webhook**
 
-* 激活 Webhook:  
-`https://api.telegram.org/bot<BOT_TOKEN>/setWebhook?url=<Worker 域名>/endpoint`
+**未设置`WEBHOOK_SECRET`变量：**
+
+`https://api.telegram.org/bot<你的BOT_TOKEN>/setWebhook?url=https://<你的Worker域名>`
       
-  例如：`https://api.telegram.org/bot12345678:A43eUzq3/setWebhook?url=https://tg-private-chatbot.xxxxxx.workers.dev/endpoint`
+  例如：`https://api.telegram.org/bot12345678:A43eUzq3/setWebhook?url=https://nextgenforward.xxxxxx.workers.dev`
+
+  如果页面返回 `{"ok":true, "result":true, "description":"Webhook was set"}`，即表示激活成功！
+  
+**已设置`WEBHOOK_SECRET`变量：**
+
+`https://api.telegram.org/bot<你的BOT_TOKEN>/setWebhook?url=https://<你的worker域名>/&secret_token=<你的WEBHOOK_SECRET>`
+      
+  例如：`https://api.telegram.org/bot12345678:A43eUzq3/setWebhook?url=https://nextgenforward.xxxxxx.workers.dev/&secret_token=Abc_1234-5d6F7G`
 
   如果页面返回 `{"ok":true, "result":true, "description":"Webhook was set"}`，即表示激活成功！
 
@@ -201,7 +238,10 @@
   如果页面返回 `{"ok":true, "result":true, "description":"Webhook was deleted"}`，即表示取消成功。
 
 ---
-## 大功告成，至此您已完成项目的所有部署和配置，可以正常开始使用！
+### 大功告成！至此您已完成项目的所有部署和配置，可以正常开始使用！
+
+此时建议您访问一下自己的 Worker 域名，如果页面返回 OK，则表示已经部署成功，如果报错则说明您的部署过程出现问题。
+
 ---
 
 ## ⚙️ 一些额外的配置（仅了解即可）
@@ -209,15 +249,13 @@
 **在 Worker.js 文件开头包含一些可调配置常量，可按需手动更改，重新部署后生效，实现部分实用功能调节**  
 
     // 用户速率限制
-    RATE_LIMIT_VERIFY: 3,              // 用户5分钟内最多可尝试人机验证次数
-    RATE_LIMIT_MESSAGE: 45,            // 用户私聊消息发送速率限制
-    RATE_LIMIT_WINDOW: 60,             // 用户私聊消息速率限制窗口
+    RATE_LIMIT_VERIFY: 3,              // 用户5分钟内最多可尝试人机验证次数，不可设为0
+    RATE_LIMIT_MESSAGE: 45,            // 用户私聊消息发送速率限制，不可设为0
+    RATE_LIMIT_WINDOW: 60,             // 用户私聊消息速率限制窗口，不可设为0
     
     // 人机验证配置
     VERIFY_BUTTON_TEXT: "🤖 点击进行人机验证",     // 人机验证按钮文本
-    VERIFY_EXPIRE_SECONDS: 300,        // 人机验证链接有效期（秒）
-    ENABLE_PENDING_MESSAGE_STORAGE: true,  // 人机验证期间消息暂存功能开关，设置为true启用消息暂存，false禁用
-    PENDING_MAX_MESSAGES: 10,          // 人机验证期间最多暂存消息数量
+    PENDING_MAX_MESSAGES: 10,          // 人机验证期间最多暂存消息数量，不可设为0
 
 ---
 
