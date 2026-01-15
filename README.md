@@ -1,7 +1,7 @@
 # Next Gen Forward v1.6.0
 <img width="535" height="185" alt="项目主图 小" src="https://github.com/user-attachments/assets/a632a655-0b6e-4f31-b6ea-1364028bf540" />
 
-这是一个基于 Cloudflare Workers 部署的 Telegram 双向私聊机器人，通过群组话题方式管理私聊，免费、安全、高效。
+这是一个基于 Cloudflare Workers 部署的 Telegram 双向私聊机器人，通过群组话题管理私聊，免费、安全、高效。
 
 支持本地题库 + Cloudflare Turnstile（可选）双重人机验证方式，一键切换。
 
@@ -156,7 +156,7 @@
    
 | 必须设置的变量 | 值 | 说明 |
 | :--- | :--- | :--- |
-| `BOT_TOKEN` | 您的机器人Token | 加密 |
+| `BOT_TOKEN` | 您的机器人Token | **加密** |
 | `SUPERGROUP_ID` | -100xxxxxxxxxx |  |
 
 
@@ -165,7 +165,7 @@
 | `WORKER_URL` | 例如`https://nextgenforward.xxxxxx.workers.dev` | **若需使用 Cloudflare 人机验证<br>则此变量必须设置** |
 | `CF_TURNSTILE_SITE_KEY` | 您的 site_key | **若需使用 Cloudflare 人机验证<br>则此变量必须设置** |
 | `CF_TURNSTILE_SECRET_KEY` | 您的 secret_key | **加密<br>若需使用 Cloudflare 人机验证<br>则此变量必须设置** |
-| `WEBHOOK_SECRET` | 自定义随机组合 | 支持`A-Z` `a-z` `0-9` `_` `-`字符组合<br>使用其它字符会出错<br>设置此变量可提高 Webhook 安全性 |
+| `WEBHOOK_SECRET` | 自定义随机组合 | **加密**<br>支持`A-Z` `a-z` `0-9` `_` `-`字符组合<br>使用其它字符会出错<br>设置此变量可提高 Webhook 安全性 |
 | `ADMIN_IDS` | 群组管理员TG用户ID 和 您机器人的TG用户ID，例如：123456789,987654321 | 可使用 [@userinfobot](https://t.me/userinfobot) 查看<br>多个ID之间使用英文逗号连接<br>**当您群组内存在多位管理员时，您可通过此变量来控制管理员指令的使用权** |
 | `API_BASE` | `https://api.telegram.org` | 缺省默认就是这个，可忽略 |
 
@@ -241,9 +241,9 @@ Cloudflare Turnstile 人机验证为可选配置，只有当您完成以下配�
   如果页面返回 `{"ok":true, "result":true, "description":"Webhook was deleted"}`，即表示取消成功。
 
 ---
-### 大功告成！至此您已完成项目的所有部署和配置，可以正常开始使用！
+### 🎉 大功告成！至此您已完成项目的所有部署和配置，可以正常开始使用！
 
-此时建议您访问一下自己的 Worker 域名，如果页面返回 OK，则表示已经部署成功，如果报错则说明您的部署过程出现问题。
+💡 此时建议您访问一下自己的 Worker 域名，如果页面返回 OK，则表示已经部署成功，如果报错则说明您的部署过程出现问题。
 
 ---
 
@@ -261,5 +261,27 @@ Cloudflare Turnstile 人机验证为可选配置，只有当您完成以下配�
     PENDING_MAX_MESSAGES: 10,          // 人机验证期间最多暂存消息数量，不可设为0
 
 ---
+
+## ❓ 常见问题及解决方法
+
+**Q: 为什么机器人没反应？**
+A: 您的环境变量设置有误 / 未绑定 KV 命名空间 / 未设置 Webhook，请检查。
+
+**Q: 为什么机器人不创建话题？**
+A: 请确保您的群组已开启话题（Topics）功能，并且已给予机器人管理员权限，开启了机器人的管理话题权限，`SUPERGROUP_ID`环境变量已正确设置。
+
+**Q: 为什么群组内不显示指令菜单？**
+A: 请访问一下您的 Worker 域名，若页面返回 OK，此时返回您的Telegram首页，再次打开群组就可以刷新出来了。
+
+**Q: 为什么我将用户封禁后立刻查看黑名单无法看到他？**
+A: 这是由于 Cloudflare 边缘节点最终一致性所导致的延迟问题，一般等待几秒后即可正常刷新。
+
+**Q: 我误用 /trust 命令将错误的人加进了白名单，怎样移除？**
+A: 很简单，**/ban** 他。
+
+**Q: 为什么用户打开人机验证页面报错 Worker Origin Error？**
+A: 请确保您的`WORKER_URL` `CF_TURNSTILE_SITE_KEY`和`CF_TURNSTILE_SECRET_KEY`**所有三个**环境变量均已在 CF 控制台设置，一般这个报错是您未设置`WORKER_URL`所导致的。
+
+
 
 **如果您喜欢这个项目，还请 Star ⭐️**
