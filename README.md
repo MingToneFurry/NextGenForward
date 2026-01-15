@@ -271,7 +271,7 @@ A: 请访问一下您的 Worker 域名，若页面返回 OK，此时返回您的
 A: 这是由于 Cloudflare 边缘节点最终一致性所导致的延迟问题，一般等待几秒后即可正常刷新。
 
 **Q: 我误用 /trust 命令将错误的人加进了白名单，怎样移除？**  
-A: 很简单，**/ban** 他。
+A: /ban 他。
 
 **Q: 为什么用户打开人机验证页面报错 Worker Origin Error？**  
 A: 请确保您的`WORKER_URL` `CF_TURNSTILE_SITE_KEY`和`CF_TURNSTILE_SECRET_KEY`**所有三个**环境变量均已在 CF 控制台设置，一般这个报错是您未设置`WORKER_URL`所导致的。
