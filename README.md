@@ -42,14 +42,14 @@
 | 特性 | 描述 |
 | :--- | :--- |
 | **🤖 双重人机验证方案** | 默认采用本地题库验证，**可选** Cloudflare Turnstile 验证，配置后可在群组中**随时一键切换**，有效防止骚扰 |
-| **🗑️ 双重垃圾消息拦截** | 默认采用本地规则拦截，**可选** Cloudflare Workers AI 兜底，可在群组中直接编辑本地规则，一键开关拦截 |
+| **🗑️ 双重垃圾消息拦截** | 默认采用本地规则拦截，**可选** Cloudflare Workers AI 兜底识别，可在群组中直接编辑本地规则，一键开关拦截 |
 | **💬 高效私聊管理** | 使用 Telegram 群组话题功能，自动为每位私聊用户创建一个独立的话题，易于管理 |
 | **⚙️ 前台设置面板** | 群组内可使用 **/settings** 打开设置面板，便于通过前台快速控制机器人开关、验证、拦截等功能 |
 | **💻 管理指令系统** | 支持 **添加白名单 (/trust)**、**封禁 (/ban)**、**解封 (/unban)**、**查看黑名单 (/blacklist)** 等操作 |
 | **⛔️ 严格权限管理** | 自动拦截用户发送的 `/` 管理指令，防止用户恶意骚扰。管理指令仅在群组内生效，并通过**可选**变量指定固定管理员使用 |
-| **🔑 可选安全增强** | 可选配置 Webhook Secret Token，阻止伪造请求，进一步提升安全性 |
+| **🔑 可选安全增强** | **可选**配置 Webhook Secret Token，阻止伪造请求，进一步提升安全性 |
 | **☁️ 零成本部署** | 基于 Cloudflare Workers 部署，无需额外成本，高效稳定 |
-| **📱 多媒体支持** | 完美支持图片、视频、文件等多种消息格式的双向转发 |
+| **📱 多媒体支持** | 完美支持图片、视频、文件等多种消息格式双向转发 |
 
 ---
 
@@ -64,18 +64,18 @@
 | :--- | :--- |
 | `/help` | **显示使用说明** |
 | `/trust` | **将当前用户添加白名单**<br>加入白名单的用户可以绕过垃圾消息识别，并且永不再需要进行人机验证 |
-| `/ban` | **封禁用户**<br>可加用户ID，例如/ban 或/ban 123456<br>没用的小提示：被封禁用户向管理员发送消息将被屏蔽，但是管理员仍可对该用户单向输出 |
-| `/unban` | **解封用户**<br>可加用户ID，例如/unban 或/unban 123456 |
+| `/ban` | **封禁用户**<br>可加用户ID，例如 /ban 或 /ban 123456<br>没用的小提示：被封禁用户向管理员发送消息将被屏蔽，但是管理员仍可对该用户单向输出 |
+| `/unban` | **解封用户**<br>可加用户ID，例如 /unban 或/unban 123456 |
 | `/blacklist` | **查看黑名单** |
 | `/info` | **查看当前用户信息**<br>可查看用户ID、用户名、用户状态等信息 |
-| `/settings` | **打开设置面板**<br>可快速控制机器人开关、人机验证、消息拦截，或使用机器人重置功能 |
+| `/settings` | **打开设置面板**<br>可快速控制机器人开关、人机验证、消息拦截，或使用重置机器人功能 |
 | `/clean` | **删除当前话题用户的所有数据**<br>删除用户话题，清空该用户的聊天记录，并重置他的人机验证，但不会改变该用户的封禁状态或白名单状态 |
 
 ---
 
 ## 📝 前期准备
 
-1.  **Cloudflare账号（免费注册）**：请提前注册或登录 Cloudflare 账号，并将 Cloudflare 页面设置为中文。
+1.  **Cloudflare 账号（免费注册）**：请提前注册登录 Cloudflare 账号，并将 Cloudflare 页面设置为中文。
 
 2.  **Telegram Bot（免费申请）**：在 [@BotFather](https://t.me/BotFather) 创建一个机器人，获取 Token。
     * ⚠️请务必保管好自己的 Token，确保不要泄露给其他人。
@@ -163,10 +163,10 @@
 
 | 可选变量 | 值 | 说明 |
 | :--- | :--- | :--- |
-| `WORKER_URL` | 例如`https://nextgenforward.xxxxxx.workers.dev` | **若需使用 Cloudflare 人机验证<br>则此变量必须设置** |
-| `CF_TURNSTILE_SITE_KEY` | 您的 site_key | **若需使用 Cloudflare 人机验证<br>则此变量必须设置** |
-| `CF_TURNSTILE_SECRET_KEY` | 您的 secret_key | **加密<br>若需使用 Cloudflare 人机验证<br>则此变量必须设置** |
-| `WEBHOOK_SECRET` | 自定义随机组合 | **加密**<br>支持`A-Z` `a-z` `0-9` `_` `-`字符组合<br>使用其它字符会出错<br>设置此变量可提高 Webhook 安全性 |
+| `WORKER_URL` | 您的 Worker 域名，例如`https://nextgenforward.xxxxxx.workers.dev` | **若需使用 Cloudflare 人机验证<br>则此变量必须设置** |
+| `CF_TURNSTILE_SITE_KEY` | 您的 site_key（详见可选配置 1） | **若需使用 Cloudflare 人机验证<br>则此变量必须设置** |
+| `CF_TURNSTILE_SECRET_KEY` | 您的 secret_key（详见可选配置 1） | **加密<br>若需使用 Cloudflare 人机验证<br>则此变量必须设置** |
+| `WEBHOOK_SECRET` | 自定义随机组合 | **加密**<br>支持`A-Z` `a-z` `0-9` `_` `-`字符组合<br>使用其它字符会出错<br>设置此变量可提高 Webhook 安全性<br>**配置此变量后激活 Webhook 必须添加secret_token字段** |
 | `ADMIN_IDS` | 群组管理员TG用户ID 和 您机器人的TG用户ID，例如：123456789,987654321 | 可使用 [@userinfobot](https://t.me/userinfobot) 查看<br>多个ID之间使用英文逗号连接<br>**当您群组内存在多位管理员时，您可通过此变量来控制管理员指令的使用权** |
 | `API_BASE` | `https://api.telegram.org` | 缺省默认就是这个，可忽略 |
 
@@ -201,7 +201,7 @@ Cloudflare Turnstile 人机验证为可选配置，只有当您完成以下配�
 5. 绑定完成
 
 💡本项目代码中默认使用的 Workers AI 模型为`@cf/meta/llama-3.1-8b-instruct-fast`  
-如果您希望更换为其他 AI 模型，或调整识别灵敏度，可手动编辑项目代码中第 202 - 206 行的
+如果您希望更换为其他 AI 模型，或调整识别灵敏度，可手动编辑项目代码中第 202 - 206 行
 ```
   ai: {
     enabled: true,
@@ -259,7 +259,7 @@ Cloudflare Turnstile 人机验证为可选配置，只有当您完成以下配�
 ## ❓ 常见问题及解决方法
 
 **Q: 为什么机器人没反应？**  
-A: 您的环境变量设置有误 / 未绑定 KV 命名空间 / 未设置 Webhook，请检查。
+A: 您的环境变量设置有误 / 未绑定 KV 命名空间 / 未设置 Webhook，未在 Bot Setting 中关闭 Group Privacy，请检查。
 
 **Q: 为什么机器人不创建话题？**  
 A: 请确保您的群组已开启话题（Topics）功能，并且已给予机器人管理员权限，开启了机器人的管理话题权限，`SUPERGROUP_ID`环境变量已正确设置。
@@ -275,6 +275,9 @@ A: 很简单，**/ban** 他。
 
 **Q: 为什么用户打开人机验证页面报错 Worker Origin Error？**  
 A: 请确保您的`WORKER_URL` `CF_TURNSTILE_SITE_KEY`和`CF_TURNSTILE_SECRET_KEY`**所有三个**环境变量均已在 CF 控制台设置，一般这个报错是您未设置`WORKER_URL`所导致的。
+
+**Q: 怎样取消激活 WEBHOOK？**  
+A: `https://api.telegram.org/bot<BOT_TOKEN>/deleteWebhook?drop_pending_updates=true`
 
 
 
