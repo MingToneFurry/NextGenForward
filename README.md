@@ -15,6 +15,8 @@
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/mole404/NextGenForward?tab=MIT-1-ov-file)
 [![Telegram](https://img.shields.io/badge/Telegram-DM-blue?style=social&logo=telegram)](https://t.me/Arona_Chat_Bot) 
 
+---
+
 界面演示：
 
 <img width="652" height="656" alt="界面示例" src="https://github.com/user-attachments/assets/bd89d509-fdef-4376-b1dd-59eec5911834" />
