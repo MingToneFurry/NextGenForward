@@ -276,7 +276,7 @@ A: /ban 他。
 **Q: 为什么用户打开人机验证页面报错 Worker Origin Error？**  
 A: 请确保您的`WORKER_URL` `CF_TURNSTILE_SITE_KEY`和`CF_TURNSTILE_SECRET_KEY`**所有三个**环境变量均已在 CF 控制台设置，一般这个报错是您未设置`WORKER_URL`所导致的。
 
-**Q: 怎样取消激活 WEBHOOK？**  
+**Q: 怎样取消激活 Webhook？**  
 A: `https://api.telegram.org/bot<BOT_TOKEN>/deleteWebhook?drop_pending_updates=true`
 
 
