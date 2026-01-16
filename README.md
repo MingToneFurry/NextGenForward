@@ -1,4 +1,4 @@
-# Next Gen Forward v1.6.0
+# Next Gen Forward v1.6.1
 <img width="535" height="185" alt="项目主图 小" src="https://github.com/user-attachments/assets/a632a655-0b6e-4f31-b6ea-1364028bf540" />
 
 这是一个基于 Cloudflare Workers 部署的 Telegram 双向私聊机器人，通过群组话题管理私聊，免费、安全、高效。
@@ -15,6 +15,13 @@
 
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/mole404/NextGenForward?tab=MIT-1-ov-file)
 [![Telegram](https://img.shields.io/badge/Telegram-DM-blue?style=social&logo=telegram)](https://t.me/Arona_Chat_Bot) 
+
+<details>
+<summary>📢 <b>v1.6.1 版本更新（2026-01-16）</b></summary>  
+
+- **垃圾消息规则优化**：优化垃圾消息识别规则，当前已支持`清空默认`本地规则，来实现纯 AI 识别。
+- **默认 AI 自信度调整**：将默认 AI 识别自信度调整为`threshold: 0.65`，识别更激进。
+
 
 ---
 
@@ -201,14 +208,16 @@ Cloudflare Turnstile 人机验证为可选配置，只有当您完成以下配�
 5. 绑定完成
 
 💡本项目代码中默认使用的 Workers AI 模型为`@cf/meta/llama-3.1-8b-instruct-fast`  
-如果您希望更换为其他 AI 模型，或调整识别自信度，可手动编辑项目代码中第 202 - 206 行  
+如果您希望更换为其他 AI 模型，或调整识别自信度，可手动编辑项目代码中第 202 - 208 行  
 **如需更换其他模型，请确保使用 Workers AI 可用的 Text Generation 模型，且必须支持 JSON Mode**
 ```
   ai: {
     enabled: true,
     model: "@cf/meta/llama-3.1-8b-instruct-fast",
+    // v1.6.0: AI 阈值默认更激进（更愿意拦截）
     threshold: 0.65
   }
+};
 ```
 编辑完成后重新部署即可自动生效。
 
