@@ -190,7 +190,7 @@
 | `CF_TURNSTILE_SITE_KEY` | 您的 site_key（详见可选配置 1） | **若需使用 Cloudflare 人机验证<br>则此变量必须设置** |
 | `CF_TURNSTILE_SECRET_KEY` | 您的 secret_key（详见可选配置 1） | **加密<br>若需使用 Cloudflare 人机验证<br>则此变量必须设置** |
 | `WEBHOOK_SECRET` | 自定义随机组合 | **加密**<br>支持`A-Z` `a-z` `0-9` `_` `-`字符组合<br>使用其它字符会出错<br>设置此变量可提高 Webhook 安全性<br>**配置此变量后激活 Webhook 必须添加secret_token字段** |
-| `ADMIN_IDS` | 群组管理员用户ID<br>例如：123456789,987654321 | 可使用 [@userinfobot](https://t.me/userinfobot) 查看<br>多个ID之间使用英文逗号连接<br>**当您群组内存在多位管理员时，您可通过添加此变量来控制管理员指令的使用权** |
+| `ADMIN_IDS` | 指定群组管理员用户ID<br>例如：123456789,987654321 | 可使用 [@userinfobot](https://t.me/userinfobot) 查看<br>多个ID之间使用英文逗号连接<br>**当您群组内存在多位管理员时，您可通过添加此变量来指定管理员指令的使用权** |
 | `API_BASE` | `https://api.telegram.org` | 缺省默认就是这个，可忽略 |
 
 
