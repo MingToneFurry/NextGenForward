@@ -4272,6 +4272,7 @@ async function handleCallbackQuery(callbackQuery, env, ctx) {
 }
 
 
+
 function renderMiniAppNoticePage({
     title = "提示",
     message = "请返回 Telegram 继续操作",
@@ -4279,35 +4280,168 @@ function renderMiniAppNoticePage({
 } = {}) {
     const safeTitle = String(title || "提示");
     const safeMsg = String(message || "");
+
     const html = `<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="auto">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="light dark" />
   <title>${safeTitle}</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
-    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;background:#0b1220;color:#e5e7eb;margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;}
-    .card{max-width:520px;width:100%;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);border-radius:16px;padding:22px 20px;box-shadow:0 10px 30px rgba(0,0,0,0.25);}
-    h1{margin:0 0 10px;font-size:20px;}
-    p{margin:0 0 14px;line-height:1.55;color:#d1d5db;}
-    .btn{display:inline-block;padding:10px 14px;border-radius:12px;background:rgba(59,130,246,0.2);border:1px solid rgba(59,130,246,0.35);color:#e5e7eb;text-decoration:none;cursor:pointer;user-select:none;}
-    .muted{font-size:12px;color:#9ca3af;margin-top:10px;}
+    :root{
+      --mx:50vw; --my:30vh;
+      --bg0:#f7f8ff; --bg1:#eef2ff;
+      --panel: rgba(255,255,255,.76);
+      --panel2: rgba(255,255,255,.56);
+      --text:#0b1220;
+      --muted: rgba(11,18,32,.62);
+      --stroke: rgba(11,18,32,.12);
+      --a0:#7c3aed; --a1:#06b6d4; --a2:#22c55e;
+      --shadow: 0 28px 70px rgba(0,0,0,.18);
+      --radius: 20px;
+    }
+    @media (prefers-color-scheme: dark){
+      :root{
+        --bg0:#050714; --bg1:#090b1c;
+        --panel: rgba(10,14,30,.64);
+        --panel2: rgba(10,14,30,.46);
+        --text: rgba(255,255,255,.92);
+        --muted: rgba(255,255,255,.62);
+        --stroke: rgba(255,255,255,.12);
+        --shadow: 0 34px 90px rgba(0,0,0,.55);
+      }
+    }
+    html[data-theme="light"]{ color-scheme: light; }
+    html[data-theme="dark"]{ color-scheme: dark; }
+
+    *{ box-sizing:border-box; }
+    body{
+      margin:0;
+      min-height:100vh;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      padding: calc(20px + env(safe-area-inset-top)) calc(20px + env(safe-area-inset-right)) calc(20px + env(safe-area-inset-bottom)) calc(20px + env(safe-area-inset-left));
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+      color: var(--text);
+      background:
+        radial-gradient(1100px 700px at 10% 10%, rgba(124,58,237,.18), transparent 60%),
+        radial-gradient(900px 650px at 90% 20%, rgba(6,182,212,.16), transparent 60%),
+        radial-gradient(900px 700px at 30% 95%, rgba(34,197,94,.12), transparent 60%),
+        linear-gradient(180deg, var(--bg0), var(--bg1));
+      overflow:hidden;
+    }
+
+    .fx{ position:fixed; inset:-25vh -25vw; pointer-events:none; z-index:0; }
+    .fx::before,.fx::after{
+      content:""; position:absolute; inset:0;
+      mix-blend-mode: screen;
+      transform: translate3d(0,0,0);
+      will-change: transform;
+      pointer-events:none;
+    }
+    .fx::before{
+      background:
+        radial-gradient(1000px 760px at 18% 22%, rgba(6,182,212,.22), transparent 62%),
+        radial-gradient(900px 700px at 82% 28%, rgba(124,58,237,.22), transparent 62%),
+        radial-gradient(980px 760px at 36% 88%, rgba(34,197,94,.16), transparent 64%);
+      opacity:.70;
+      animation: fogMove1 26s ease-in-out infinite alternate;
+    }
+    .fx::after{
+      background:
+        radial-gradient(980px 740px at 70% 78%, rgba(6,182,212,.16), transparent 62%),
+        radial-gradient(920px 720px at 26% 70%, rgba(124,58,237,.16), transparent 64%),
+        radial-gradient(1100px 820px at 55% 40%, rgba(34,197,94,.12), transparent 66%);
+      opacity:.52;
+      animation: fogMove2 34s ease-in-out infinite alternate;
+    }
+
+    @keyframes fogMove1{
+      0%{ transform: translate3d(-6vw,-3vh,0) scale(1.02); }
+      100%{ transform: translate3d(5vw,4vh,0) scale(1.02); }
+    }
+    @keyframes fogMove2{
+      0%{ transform: translate3d(6vw,4vh,0) scale(1.03); }
+      100%{ transform: translate3d(-5vw,-3vh,0) scale(1.03); }
+    }
+
+
+    .wrap{ width:min(560px, 92vw); margin-inline:auto; position:relative; z-index:1; }
+    .panel{
+      position:relative;
+      border-radius: var(--radius);
+      background: linear-gradient(180deg, var(--panel), var(--panel2));
+      border: 1px solid var(--stroke);
+      box-shadow: var(--shadow);
+      overflow:hidden;
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+    }
+
+    .content{ position:relative; z-index:2; padding: 22px 22px 18px; }
+    h1{ margin:0 0 10px; font-size: 18px; line-height:1.2; letter-spacing:.2px; }
+    p{ margin:0 0 14px; color: var(--muted); line-height:1.55; font-size: 13px; }
+
+    .btn{
+      display:inline-flex;
+      align-items:center;
+      gap:10px;
+      padding:10px 12px;
+      border-radius: 14px;
+      border: 1px solid var(--stroke);
+      background: rgba(255,255,255,.08);
+      color: var(--text);
+      cursor:pointer;
+      user-select:none;
+      text-decoration:none;
+      transition: transform .15s ease, background .2s ease;
+    }
+    .btn:hover{ transform: translateY(-1px); background: rgba(255,255,255,.12); }
+    .dot{ width:9px; height:9px; border-radius:50%; background: linear-gradient(135deg, var(--a1), var(--a0)); box-shadow: 0 0 0 3px rgba(6,182,212,.15); }
+
+    .muted{ margin-top: 12px; font-size: 12px; color: var(--muted); }
+
+    @media (prefers-reduced-motion: reduce){ .fx::before, .fx::after{ animation:none !important; } }
   </style>
 </head>
 <body>
-  <div class="card">
-    <h1>${safeTitle}</h1>
-    <p>${safeMsg}</p>
-    <a class="btn" href="javascript:void(0)" onclick="try{Telegram.WebApp.close();}catch(e){}">返回 Telegram</a>
-    <div class="muted">若未自动返回，请手动关闭此页面。</div>
+  <div class="fx" aria-hidden="true"></div>
+  <div class="grid" aria-hidden="true"></div>
+
+  <div class="wrap">
+    <div class="panel">
+      <div class="content">
+        <h1>${safeTitle}</h1>
+        <p>${safeMsg}</p>
+        <a class="btn" href="javascript:void(0)" onclick="try{Telegram.WebApp.close();}catch(e){}">
+          <span class="dot" aria-hidden="true"></span>
+          <span>返回 Telegram</span>
+        </a>
+        <div class="muted">若未自动返回，请手动关闭此页面。</div>
+      </div>
+    </div>
   </div>
+
   <script>
     try {
       if (window.Telegram && Telegram.WebApp) {
         Telegram.WebApp.ready();
-        const ms = Number(${autoCloseMs});
-        if (Number.isFinite(ms) && ms > 0) setTimeout(() => { try { Telegram.WebApp.close(); } catch (e) {} }, ms);
+        Telegram.WebApp.expand();
+      }
+    } catch (e) {}
+
+    window.addEventListener('pointermove', (e) => {
+      document.documentElement.style.setProperty('--mx', e.clientX + 'px');
+      document.documentElement.style.setProperty('--my', e.clientY + 'px');
+    }, { passive: true });
+
+    try {
+      const ms = Number(${autoCloseMs});
+      if (Number.isFinite(ms) && ms > 0) {
+        setTimeout(() => { try { Telegram.WebApp.close(); } catch (e) {} }, ms);
       }
     } catch (e) {}
   </script>
@@ -4321,6 +4455,7 @@ function renderMiniAppNoticePage({
         }
     });
 }
+
 
 async function renewTurnstileSessionAndSend(userId, env, origin, previousSessionData = null) {
     // 与 sendTurnstileVerification 的行为保持一致：也受 verify 速率限制约束
@@ -4402,44 +4537,162 @@ async function renderVerifyPage(request, env, ctx) {
         return new Response('Invalid user ID', { status: 400 });
     }
 
+    
     // Turnstile 未配置时，直接提示并引导回 Telegram 使用本地题库验证
     if (!hasTurnstileBinding(env)) {
-        const html = `<!doctype html>
-<html lang="zh-CN">
+        const html = `<!DOCTYPE html>
+<html lang="zh-CN" data-theme="auto">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="light dark" />
   <title>验证不可用</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
+    :root{
+      --mx:50vw; --my:30vh;
+      --bg0:#f7f8ff; --bg1:#eef2ff;
+      --panel: rgba(255,255,255,.78);
+      --panel2: rgba(255,255,255,.58);
+      --text:#0b1220;
+      --muted: rgba(11,18,32,.62);
+      --stroke: rgba(11,18,32,.12);
+      --a0:#7c3aed; --a1:#06b6d4; --a2:#22c55e;
+      --shadow: 0 28px 70px rgba(0,0,0,.18);
+      --radius: 22px;
+    }
+    @media (prefers-color-scheme: dark){
+      :root{
+        --bg0:#050714; --bg1:#090b1c;
+        --panel: rgba(10,14,30,.64);
+        --panel2: rgba(10,14,30,.46);
+        --text: rgba(255,255,255,.92);
+        --muted: rgba(255,255,255,.62);
+        --stroke: rgba(255,255,255,.12);
+        --shadow: 0 34px 90px rgba(0,0,0,.55);
+      }
+    }
+    *{ box-sizing:border-box; }
     body{
-      font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Noto Sans","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
-      margin:0;padding:24px;background:#0b1220;color:#e5e7eb;
+      margin:0;
+      min-height:100vh;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      padding: calc(20px + env(safe-area-inset-top)) calc(20px + env(safe-area-inset-right)) calc(20px + env(safe-area-inset-bottom)) calc(20px + env(safe-area-inset-left));
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+      color: var(--text);
+      background:
+        radial-gradient(1100px 700px at 10% 10%, rgba(124,58,237,.18), transparent 60%),
+        radial-gradient(900px 650px at 90% 20%, rgba(6,182,212,.16), transparent 60%),
+        radial-gradient(900px 700px at 30% 95%, rgba(34,197,94,.12), transparent 60%),
+        linear-gradient(180deg, var(--bg0), var(--bg1));
+      overflow:hidden;
     }
-    .card{
-      max-width:520px;margin:0 auto;background:rgba(255,255,255,.06);
-      border:1px solid rgba(255,255,255,.12);border-radius:16px;padding:20px;
+
+    .fx{ position:fixed; inset:-25vh -25vw; pointer-events:none; z-index:0; }
+    .fx::before,.fx::after{
+      content:""; position:absolute; inset:0;
+      mix-blend-mode: screen;
+      transform: translate3d(0,0,0);
+      will-change: transform;
+      pointer-events:none;
     }
-    h1{font-size:20px;margin:0 0 10px 0;}
-    p{margin:0 0 14px 0;line-height:1.5;color:#cbd5e1;}
-    code{background:rgba(255,255,255,.08);padding:2px 6px;border-radius:6px;}
-    a.btn{
-      display:inline-block;padding:10px 14px;border-radius:12px;background:rgba(255,255,255,.12);
-      border:1px solid rgba(255,255,255,.18);color:#fff;text-decoration:none;
+    .fx::before{
+      background:
+        radial-gradient(1000px 760px at 18% 22%, rgba(6,182,212,.22), transparent 62%),
+        radial-gradient(900px 700px at 82% 28%, rgba(124,58,237,.22), transparent 62%),
+        radial-gradient(980px 760px at 36% 88%, rgba(34,197,94,.16), transparent 64%);
+      opacity:.70;
+      animation: fogMove1 26s ease-in-out infinite alternate;
     }
-    .small{font-size:12px;color:#94a3b8;margin-top:12px;line-height:1.4;}
+    .fx::after{
+      background:
+        radial-gradient(980px 740px at 70% 78%, rgba(6,182,212,.16), transparent 62%),
+        radial-gradient(920px 720px at 26% 70%, rgba(124,58,237,.16), transparent 64%),
+        radial-gradient(1100px 820px at 55% 40%, rgba(34,197,94,.12), transparent 66%);
+      opacity:.52;
+      animation: fogMove2 34s ease-in-out infinite alternate;
+    }
+
+    @keyframes fogMove1{
+      0%{ transform: translate3d(-6vw,-3vh,0) scale(1.02); }
+      100%{ transform: translate3d(5vw,4vh,0) scale(1.02); }
+    }
+    @keyframes fogMove2{
+      0%{ transform: translate3d(6vw,4vh,0) scale(1.03); }
+      100%{ transform: translate3d(-5vw,-3vh,0) scale(1.03); }
+    }
+
+
+    .wrap{ width:min(600px, 92vw); margin-inline:auto; position:relative; z-index:1; }
+    .panel{
+      position:relative;
+      border-radius: var(--radius);
+      background: linear-gradient(180deg, var(--panel), var(--panel2));
+      border: 1px solid var(--stroke);
+      box-shadow: var(--shadow);
+      overflow:hidden;
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+    }
+
+    .content{ position:relative; z-index:2; padding: 22px 22px 18px; }
+    h1{ margin:0 0 10px; font-size: 18px; line-height:1.2; }
+    p{ margin:0 0 12px; color: var(--muted); line-height:1.55; font-size: 13px; }
+    code{ background: rgba(255,255,255,.10); padding:2px 6px; border-radius:8px; border:1px solid var(--stroke); }
+
+    .btn{
+      display:inline-flex;
+      align-items:center;
+      gap:10px;
+      padding:10px 12px;
+      border-radius: 14px;
+      border: 1px solid var(--stroke);
+      background: rgba(255,255,255,.08);
+      color: var(--text);
+      cursor:pointer;
+      user-select:none;
+      text-decoration:none;
+      transition: transform .15s ease, background .2s ease;
+    }
+    .btn:hover{ transform: translateY(-1px); background: rgba(255,255,255,.12); }
+    .dot{ width:9px; height:9px; border-radius:50%; background: linear-gradient(135deg, var(--a1), var(--a0)); box-shadow: 0 0 0 3px rgba(6,182,212,.15); }
+
+    .hint{ margin-top: 12px; font-size: 12px; color: var(--muted); line-height: 1.45; }
+
+    @media (prefers-reduced-motion: reduce){ .fx::before, .fx::after{ animation:none !important; } }
   </style>
 </head>
 <body>
-  <div class="card">
-    <h1>Turnstile 未配置</h1>
-    <p>管理员尚未在环境变量中配置 <code>CF_TURNSTILE_SITE_KEY</code> 与 <code>CF_TURNSTILE_SECRET_KEY</code>，因此网页验证暂不可用。</p>
-    <p>请返回 Telegram，在对话中使用 <b>本地题库验证</b> 完成人机验证。</p>
-    <a class="btn" href="#" onclick="try{Telegram.WebApp.close();}catch(e){};return false;">返回 Telegram</a>
-    <div class="small">提示：如果你是管理员，请在 Cloudflare Workers 的 Variables/Secrets 中配置上述两项后再启用 Turnstile。</div>
+  <div class="fx" aria-hidden="true"></div>
+  <div class="grid" aria-hidden="true"></div>
+
+  <div class="wrap">
+    <div class="panel">
+      <div class="content">
+        <h1>Turnstile 未配置</h1>
+        <p>管理员尚未在环境变量中配置 <code>CF_TURNSTILE_SITE_KEY</code> 与 <code>CF_TURNSTILE_SECRET_KEY</code>，因此网页验证暂不可用。</p>
+        <p>请返回 Telegram，在对话中使用 <b>本地题库验证</b> 完成人机验证。</p>
+        <a class="btn" href="javascript:void(0)" onclick="try{Telegram.WebApp.close();}catch(e){}">
+          <span class="dot" aria-hidden="true"></span>
+          <span>返回 Telegram</span>
+        </a>
+        <div class="hint">提示：如果你是管理员，请在 Cloudflare Workers 的 Variables/Secrets 中配置上述两项后再启用 Turnstile。</div>
+      </div>
+    </div>
   </div>
+
+  <script>
+    try { if (window.Telegram && Telegram.WebApp) { Telegram.WebApp.ready(); Telegram.WebApp.expand(); } } catch (e) {}
+    window.addEventListener('pointermove', (e) => {
+      document.documentElement.style.setProperty('--mx', e.clientX + 'px');
+      document.documentElement.style.setProperty('--my', e.clientY + 'px');
+    }, { passive: true });
+  </script>
 </body>
 </html>`;
+
         return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8' }, status: 503 });
     }
 
@@ -4523,328 +4776,417 @@ async function renderVerifyPage(request, env, ctx) {
         <div class="info-box">
             <p>🔒 您的隐私受到保护，验证过程不会收集个人信息</p>
             <p>⚡ 验证成功后会自动返回 Telegram</p>
-                ${ps === '1' ? '<p>📩 您刚才发送的消息已暂存，验证通过后会自动转发</p>' : ''}
+                ${ps === '1' ? '<p>📩 您发送的消息已暂存，验证通过会自动转发</p>' : ''}
 `;
     infoBoxHtml += `</div>`;
     
-    const html = `
-<!DOCTYPE html>
-<html lang="zh-CN">
+    const html = `<!DOCTYPE html>
+<html lang="zh-CN" data-theme="auto">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>人机验证</title>
-    <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
-    <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <style>
-        :root {
-            --primary-color: #3b82f6;
-            --success-color: #10b981;
-            --error-color: #ef4444;
-            --background-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            --card-bg: rgba(255, 255, 255, 0.95);
-            --text-primary: #1f2937;
-            --text-secondary: #6b7280;
-        }
-        
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            min-height: 100vh;
-            background: var(--background-gradient);
-            color: var(--text-primary);
-            padding: 20px;
-        }
-        
-        .container {
-            background: var(--card-bg);
-            border-radius: 20px;
-            padding: 2.5rem;
-            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
-            max-width: 480px;
-            width: 100%;
-            text-align: center;
-            backdrop-filter: blur(10px);
-            border: 1px solid rgba(255, 255, 255, 0.2);
-        }
-        
-        .logo {
-            font-size: 3rem;
-            margin-bottom: 1.5rem;
-            animation: bounce 2s infinite;
-        }
-        
-        h1 {
-            font-size: 1.75rem;
-            font-weight: 700;
-            margin-bottom: 0.75rem;
-            color: var(--text-primary);
-            line-height: 1.3;
-        }
-        
-        .subtitle {
-            color: var(--text-secondary);
-            margin-bottom: 2rem;
-            font-size: 1rem;
-            line-height: 1.5;
-        }
-        
-        .turnstile-container {
-            margin: 2rem 0;
-            display: flex;
-            justify-content: center;
-        }
-        
-        .status-message {
-            padding: 1rem;
-            border-radius: 12px;
-            margin: 1.5rem 0;
-            display: none;
-            animation: fadeIn 0.5s ease-in-out;
-            font-weight: 500
-        }
-        
-        .success {
-            background-color: rgba(16, 185, 129, 0.1);
-            color: var(--success-color);
-            border: 1px solid rgba(16, 185, 129, 0.2);
-        }
-        
-        .error {
-            background-color: rgba(239, 68, 68, 0.1);
-            color: var(--error-color);
-            border: 1px solid rgba(239, 68, 68, 0.2);
-        }
-        
-        .info-box {
-            background-color: rgba(59, 130, 246, 0.1);
-            border-left: 4px solid var(--primary-color);
-            padding: 1rem;
-            margin: 1.5rem 0;
-            text-align: left;
-            border-radius: 8px;
-        }
-        
-        .info-box p {
-            margin: 0.5rem 0;
-            font-size: 0.9rem;
-        }
-        
-        .footer {
-            margin-top: 2rem;
-            color: var(--text-secondary);
-            font-size: 0.875rem;
-        }
-        
-        .loading {
-            display: none;
-            margin: 1rem 0;
-        }
-        
-        .loading-spinner {
-            width: 40px;
-            height: 40px;
-            border: 4px solid rgba(59, 130, 246, 0.2);
-            border-top: 4px solid var(--primary-color);
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
-            margin: 0 auto;
-        }
-        
-        @keyframes bounce {
-            0%, 100% { transform: translateY(0); }
-            50% { transform: translateY(-10px); }
-        }
-        
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-        
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(-10px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        
-        @media (max-width: 480px) {
-            .container {
-                padding: 1.5rem;
-            }
-            
-            h1 {
-                fontSize: 1.5rem;
-            }
-            
-            .logo {
-                fontSize: 2.5rem;
-            }
-        }
-    </style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
+  <title>安全验证</title>
+
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+
+  <style>
+    :root{
+      --mx: 50vw;
+      --my: 30vh;
+
+      --bg0: #f7f8ff;
+      --bg1: #eef2ff;
+      --panel: rgba(255,255,255,.72);
+      --panel2: rgba(255,255,255,.5);
+      --text: #0b1220;
+      --muted: rgba(11,18,32,.62);
+      --stroke: rgba(11,18,32,.10);
+
+      --a0: #7c3aed;
+      --a1: #06b6d4;
+      --a2: #22c55e;
+      --warn:#ef4444;
+      --ok:  #10b981;
+
+      --shadow: 0 28px 70px rgba(0,0,0,.18);
+      --radius: 22px;
+    }
+
+    @media (prefers-color-scheme: dark){
+      :root{
+        --bg0: #050714;
+        --bg1: #090b1c;
+        --panel: rgba(10,14,30,.62);
+        --panel2: rgba(10,14,30,.45);
+        --text: rgba(255,255,255,.92);
+        --muted: rgba(255,255,255,.60);
+        --stroke: rgba(255,255,255,.10);
+        --shadow: 0 34px 90px rgba(0,0,0,.55);
+      }
+    }
+
+    html[data-theme="light"]{ color-scheme: light; }
+    html[data-theme="dark"]{ color-scheme: dark; }
+
+    *{ box-sizing:border-box; margin:0; padding:0; }
+    body{
+      min-height:100vh;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      padding: calc(20px + env(safe-area-inset-top)) calc(20px + env(safe-area-inset-right)) calc(20px + env(safe-area-inset-bottom)) calc(20px + env(safe-area-inset-left));
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+      color: var(--text);
+      background:
+        radial-gradient(1100px 700px at 10% 10%, rgba(124,58,237,.18), transparent 60%),
+        radial-gradient(900px 650px at 90% 20%, rgba(6,182,212,.16), transparent 60%),
+        radial-gradient(900px 700px at 30% 95%, rgba(34,197,94,.12), transparent 60%),
+        linear-gradient(180deg, var(--bg0), var(--bg1));
+      overflow:hidden;
+    }
+
+    .fx{ position:fixed; inset:-25vh -25vw; pointer-events:none; z-index:0; }
+    .fx::before,.fx::after{
+      content:""; position:absolute; inset:0;
+      mix-blend-mode: screen;
+      transform: translate3d(0,0,0);
+      will-change: transform;
+      pointer-events:none;
+    }
+    .fx::before{
+      background:
+        radial-gradient(1000px 760px at 18% 22%, rgba(6,182,212,.22), transparent 62%),
+        radial-gradient(900px 700px at 82% 28%, rgba(124,58,237,.22), transparent 62%),
+        radial-gradient(980px 760px at 36% 88%, rgba(34,197,94,.16), transparent 64%);
+      opacity:.70;
+      animation: fogMove1 26s ease-in-out infinite alternate;
+    }
+    .fx::after{
+      background:
+        radial-gradient(980px 740px at 70% 78%, rgba(6,182,212,.16), transparent 62%),
+        radial-gradient(920px 720px at 26% 70%, rgba(124,58,237,.16), transparent 64%),
+        radial-gradient(1100px 820px at 55% 40%, rgba(34,197,94,.12), transparent 66%);
+      opacity:.52;
+      animation: fogMove2 34s ease-in-out infinite alternate;
+    }
+
+    @keyframes fogMove1{
+      0%{ transform: translate3d(-6vw,-3vh,0) scale(1.02); }
+      100%{ transform: translate3d(5vw,4vh,0) scale(1.02); }
+    }
+    @keyframes fogMove2{
+      0%{ transform: translate3d(6vw,4vh,0) scale(1.03); }
+      100%{ transform: translate3d(-5vw,-3vh,0) scale(1.03); }
+    }
+
+      50%{ transform: translate3d(2vw,-1vh,0) scale(1.02); }
+    }
+
+    .wrap{ width:min(560px, 92vw); margin-inline:auto; position:relative; z-index:1; }
+
+    .panel{
+      position:relative;
+      border-radius: var(--radius);
+      background: linear-gradient(180deg, var(--panel), var(--panel2));
+      border: 1px solid var(--stroke);
+      box-shadow: var(--shadow);
+      overflow:hidden;
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+    }
+
+    .content{ position:relative; z-index:2; padding: 22px 22px 18px; }
+
+    .top{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:12px;
+      margin-bottom: 14px;
+    }
+
+    .brand{ display:flex; align-items:center; gap:12px; min-width:0; }
+    .logo{
+      width:44px; height:44px; border-radius: 14px;
+      display:grid; place-items:center;
+      background:
+        radial-gradient(18px 18px at 30% 30%, rgba(255,255,255,.45), transparent 55%),
+        linear-gradient(135deg, rgba(6,182,212,.35), rgba(124,58,237,.35));
+      border: 1px solid rgba(255,255,255,.18);
+      box-shadow: 0 16px 38px rgba(0,0,0,.18);
+      font-size: 20px;
+    }
+
+    .title{ display:flex; flex-direction:column; gap:2px; min-width:0; }
+    .title h1{
+      font-size: 18px;
+      line-height: 1.2;
+      letter-spacing: .2px;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
+    .title p{
+      font-size: 12.5px;
+      color: var(--muted);
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
+
+    .info{
+      margin-top: 8px;
+      margin-bottom: 14px;
+      padding: 12px 12px;
+      border-radius: 16px;
+      border: 1px solid var(--stroke);
+      background: rgba(255,255,255,.06);
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .info p{ margin: 6px 0; }
+
+    .widgetArea{
+      margin-top: 10px;
+      padding: 0;
+      border: none;
+      background: transparent;
+      position: relative;
+    }
+    #turnstile-widget{
+      display: grid;
+      place-items: center;
+      min-height: 78px;
+      width: 300px;
+      max-width: 100%;
+      margin: 0 auto;
+      position: relative;
+      z-index: 1;
+    }
+
+    .loading{ display:none; margin-top: 10px; text-align:center; color: var(--muted); font-size: 13px; }
+    .spinner{
+      width: 40px; height: 40px; border-radius: 50%;
+      border: 3px solid rgba(255,255,255,.25);
+      border-top-color: rgba(6,182,212,.85);
+      animation: spin2 1s linear infinite;
+      margin: 0 auto;
+      filter: drop-shadow(0 10px 22px rgba(6,182,212,.18));
+    }
+    @keyframes spin2{ to{ transform: rotate(360deg);} }
+
+    .status{ display:none; margin-top: 12px; padding: 12px 12px; border-radius: 16px; border: 1px solid var(--stroke); font-size: 13px; line-height: 1.4; }
+    .status.ok{ border-color: rgba(16,185,129,.35); background: rgba(16,185,129,.08); }
+    .status.err{ border-color: rgba(239,68,68,.35); background: rgba(239,68,68,.08); }
+
+    .foot{ display:flex; justify-content:center; gap:10px; margin-top: 14px; color: var(--muted); font-size: 12px; padding-bottom: 4px; }
+    .pill{ border: 1px solid var(--stroke); background: rgba(255,255,255,.06); padding: 6px 10px; border-radius: 999px; white-space:nowrap; }
+
+    @media (prefers-reduced-motion: reduce){ .fx::before, .fx::after{ animation:none !important; } }
+      .grid{ opacity:.10; }
+    }
+  </style>
 </head>
+
 <body>
-    <div class="container">
-        <div class="logo">🤖</div>
-        <h1>请完成安全验证</h1>
-        <p class="subtitle">为了保护系统安全，请完成下方的人机验证以继续操作</p>
-        
-        ${infoBoxHtml}
-        
-        <div class="turnstile-container" id="turnstile-widget">
-            <!-- Turnstile 验证组件将在这里加载 -->
+  <div class="fx" aria-hidden="true"></div>
+  <div class="grid" aria-hidden="true"></div>
+
+  <div class="wrap">
+    <div class="panel">
+      <div class="content">
+        <div class="top">
+          <div class="brand">
+            <div class="logo">🛡️</div>
+            <div class="title">
+              <h1>安全验证</h1>
+              <p>该页面用于阻止自动化请求</p>
+            </div>
+          </div>
         </div>
-        
-        <div class="loading" id="loading">
-            <div class="loading-spinner"></div>
-            <p style="margin-top: 0.5rem;">正在验证，请稍候...</p>
+
+        <div class="info">
+          ${infoBoxHtml}
         </div>
-        
-        <div class="status-message success" id="success-msg">
-            ✅ 验证成功！正在返回 Telegram...
+
+        <div class="widgetArea">
+          <div id="turnstile-widget"></div>
+
+          <div class="loading" id="loading">
+            <div class="spinner"></div>
+            <div style="margin-top:10px;">正在验证，请稍候…</div>
+          </div>
+
+          <div class="status ok" id="success-msg">✅ 验证成功！正在返回 Telegram…</div>
+          <div class="status err" id="error-msg">❌ 验证失败，请刷新页面重试</div>
         </div>
-        
-        <div class="status-message error" id="error-msg">
-            ❌ 验证失败，请刷新页面重试
+
+        <div class="foot">
+          <span class="pill">Powered by Cloudflare</span>
         </div>
-        
-        <div class="footer">
-            <p>Powered by Cloudflare</p>
-            <p>此验证用于防止自动化请求</p>
-        </div>
+      </div>
     </div>
+  </div>
 
-    <script>
-        const tg = window.Telegram?.WebApp;
-        if (tg) {
-            tg.ready();
-            tg.expand();
+  <script>
+    const tg = window.Telegram?.WebApp;
+    if (tg) { try { tg.ready(); tg.expand(); } catch (_) {} }
+
+    const EVENT_URL = '${eventUrl}';
+    let widgetId = null;
+
+    // ====== Pointer glow ======
+    window.addEventListener('pointermove', (e) => {
+      document.documentElement.style.setProperty('--mx', (e.clientX || 0) + 'px');
+      document.documentElement.style.setProperty('--my', (e.clientY || 0) + 'px');
+    }, { passive: true });
+
+    function reportFail(reason, errorCode) {
+      try {
+        const urlParams = new URLSearchParams(window.location.search);
+        const sid = urlParams.get('sid');
+        const uid = urlParams.get('uid');
+        if (!sid || !uid) return;
+
+        fetch(EVENT_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sid, uid, reason, errorCode: errorCode || null }),
+          keepalive: true
+        }).catch(() => {});
+      } catch (_) {}
+    }
+
+    function showError(message) {
+      const errorEl = document.getElementById('error-msg');
+      errorEl.textContent = message;
+      errorEl.style.display = 'block';
+      document.getElementById('success-msg').style.display = 'none';
+      document.getElementById('loading').style.display = 'none';
+      document.getElementById('turnstile-widget').style.display = 'grid';
+    }
+
+    function showSuccess() {
+      document.getElementById('loading').style.display = 'none';
+      document.getElementById('error-msg').style.display = 'none';
+      document.getElementById('success-msg').style.display = 'block';
+    }
+
+    function onFail(reason, errorCode) {
+      console.warn('Turnstile fail:', reason, errorCode || '');
+      reportFail(reason, errorCode);
+      document.getElementById('loading').style.display = 'none';
+      showError("☁️ Cloudflare 验证失败，请返回 Telegram 点击最新按钮重试");
+      try {
+        if (window.turnstile && widgetId !== null) window.turnstile.reset(widgetId);
+      } catch (_) {}
+    }
+
+    function onVerify(token) {
+      const urlParams = new URLSearchParams(window.location.search);
+      const sid = urlParams.get('sid');
+      const uid = urlParams.get('uid');
+
+      if (!sid || !uid) {
+        showError("错误：缺少会话参数");
+        return;
+      }
+
+      document.getElementById('turnstile-widget').style.display = 'none';
+      document.getElementById('loading').style.display = 'block';
+
+      fetch('${callbackUrl}', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, sid, uid })
+      })
+      .then(r => r.ok ? r.json() : Promise.reject(new Error('验证失败')))
+      .then(data => {
+        if (data.success) {
+          showSuccess();
+          if (data.enableStorage && data.forwardedCount > 0) {
+            document.getElementById('success-msg').textContent =
+              '✅ 验证成功！已自动转发 ' + data.forwardedCount + ' 条消息。正在返回 Telegram…';
+          }
+          setTimeout(() => {
+            if (tg) tg.close();
+            else alert('验证成功！请返回 Telegram 继续。');
+          }, 1600);
+        } else {
+          throw new Error(data.error || '验证失败');
         }
+      })
+      .catch(err => {
+        console.error('验证错误:', err);
+        onFail('verify_failed');
+      });
+    }
 
-        const EVENT_URL = '${eventUrl}';
-        let widgetId = null;
+    function debounce(fn, ms) {
+      let t = null;
+      return function() {
+        const args = arguments;
+        clearTimeout(t);
+        t = setTimeout(() => fn.apply(null, args), ms);
+      };
+    }
 
-        function reportFail(reason, errorCode) {
-            try {
-                const urlParams = new URLSearchParams(window.location.search);
-                const sid = urlParams.get('sid');
-                const uid = urlParams.get('uid');
-                if (!sid || !uid) return;
+    let widgetSize = null;
+    function chooseTurnstileSize() {
+      // Turnstile fixed sizes: normal (300x65) / compact (150x140).
+      // 保守兜底：当视口过窄时用 compact，避免 300px 宽度在极小 WebView 溢出。
+      const vw = Math.min(document.documentElement.clientWidth || 0, window.innerWidth || 0);
+      return (vw && vw < 360) ? 'compact' : 'normal';
+    }
 
-                fetch(EVENT_URL, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ sid, uid, reason, errorCode: errorCode || null }),
-                    keepalive: true
-                }).catch(() => {});
-            } catch (_) {}
-        }
+    function initTurnstile() {
+      if (widgetId !== null) return;
+      if (!window.turnstile) return setTimeout(initTurnstile, 80);
 
-        function onFail(reason, errorCode) {
-            console.warn('Turnstile fail:', reason, errorCode || '');
-            reportFail(reason, errorCode);
-            document.getElementById('loading').style.display = 'none';
-            showError("☁️ Cloudflare 验证失败，请返回 Telegram 点击最新按钮重试");
-            try {
-                if (window.turnstile && widgetId !== null) {
-                    window.turnstile.reset(widgetId);
-                }
-            } catch (_) {}
-        }
+      const desiredSize = chooseTurnstileSize();
+      widgetSize = desiredSize;
 
-        function onVerify(token) {
-            const urlParams = new URLSearchParams(window.location.search);
-            const sid = urlParams.get('sid');
-            const uid = urlParams.get('uid');
-            
-            if (!sid || !uid) {
-                showError("错误：缺少会话参数");
-                return;
-            }
+      const mount = document.getElementById('turnstile-widget');
+      if (mount) {
+        mount.innerHTML = '';
+        mount.style.width = (desiredSize === 'compact') ? '150px' : '300px';
+      }
 
-            document.getElementById('turnstile-widget').style.display = 'none';
-            document.getElementById('loading').style.display = 'block';
-            
-            fetch('${callbackUrl}', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ token, sid, uid })
-            })
-            .then(response => {
-                if (response.ok) {
-                    return response.json();
-                }
-                throw new Error('验证失败');
-            })
-            .then(data => {
-                if (data.success) {
-                    showSuccess();
-                    
-                    if (data.enableStorage && data.forwardedCount > 0) {
-                        document.getElementById('success-msg').textContent = 
-                            '✅ 验证成功！已自动转发 ' + data.forwardedCount + ' 条消息。正在返回 Telegram...';
-                    }
-                    
-                    setTimeout(() => {
-                        if (tg) {
-                            tg.close();
-                        } else {
-                            alert('验证成功！请返回 Telegram 继续。');
-                        }
-                    }, 2000);
-                } else {
-                    throw new Error(data.error || '验证失败');
-                }
-            })
-            .catch(err => {
-                console.error('验证错误:', err);
-                onFail('verify_failed');
-            });
-        }
+      widgetId = window.turnstile.render('#turnstile-widget', {
+        sitekey: '${siteKey}',
+        callback: onVerify,
+        'error-callback': (errorCode) => onFail('error', errorCode),
+        'expired-callback': () => onFail('expired'),
+        'timeout-callback': () => onFail('timeout'),
+        ${turnstileAction ? "action: '" + turnstileAction + "'," : ""}
+        theme: 'auto',
+        size: desiredSize,
+        language: 'zh-CN'
+      });
+    }
 
-        function showError(message) {
-            const errorEl = document.getElementById('error-msg');
-            errorEl.textContent = message;
-            errorEl.style.display = 'block';
-            document.getElementById('turnstile-widget').style.display = 'block';
-        }
+    const handleResize = debounce(() => {
+      // 如果用户旋转屏幕/窗口变窄，必要时重建为 compact，避免溢出
+      const desired = chooseTurnstileSize();
+      if (widgetId !== null && widgetSize && desired !== widgetSize) {
+        try { if (window.turnstile) window.turnstile.remove(widgetId); } catch (_) {}
+        widgetId = null;
+        widgetSize = null;
+        initTurnstile();
+      }
+    }, 200);
 
-        function showSuccess() {
-            document.getElementById('loading').style.display = 'none';
-            const successEl = document.getElementById('success-msg');
-            successEl.style.display = 'block';
-        }
+    window.addEventListener('resize', handleResize, { passive: true });
+    window.addEventListener('orientationchange', handleResize);
 
-        function initTurnstile() {
-            if (window.turnstile) {
-                widgetId = window.turnstile.render('#turnstile-widget', {
-                    sitekey: '${siteKey}',
-                    callback: onVerify,
-                    'error-callback': function(errorCode) { onFail('error', errorCode); },
-                    'expired-callback': function() { onFail('expired'); },
-                    'timeout-callback': function() { onFail('timeout'); },
-                    ${turnstileAction ? "action: '" + turnstileAction + "'," : ""}
-                    theme: 'light',
-                    size: 'normal',
-                    language: 'zh-CN'
-                });
-            } else {
-                setTimeout(initTurnstile, 100);
-            }
-        }
-
-        document.addEventListener('DOMContentLoaded', initTurnstile);
-    </script>
+    window.addEventListener('load', () => { initTurnstile(); });
+  </script>
 </body>
 </html>`;
-    
-    return new Response(html, {
+return new Response(html, {
         headers: { 
             'content-type': 'text/html;charset=UTF-8',
             'cache-control': 'no-cache, no-store, must-revalidate'
