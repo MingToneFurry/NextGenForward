@@ -186,7 +186,7 @@ async function setGlobalVerifyMode(env, mode) {
 // 默认垃圾规则（可在 /settings 中编辑）
 const DEFAULT_SPAM_RULES = {
   version: 1,
-  max_links: 3,                 // 文本中链接数 >= max_links 判定为 spam；0 表示不启用
+  max_links: 2,                 // 文本中链接数 >= max_links 判定为 spam；0 表示不启用
   keywords: [
     "加群", "进群", "推广", "广告", "返利", "博彩", "代投", "套利",
     "USDT", "BTC", "ETH", "币圈", "空投", "交易所", "稳赚", "客服", "开户链接"
@@ -3777,7 +3777,7 @@ if (action === "v_q" || action === "v_t") {
             "allow: xxx, yyy    （放行关键词）",
             "block_re: /.../i   （屏蔽正则，支持 /pat/flags 或纯 pat）",
             "allow_re: /.../i   （放行正则）",
-            "max_links=3        （修改允许链接数，0-20）",
+            "max_links=2        （修改允许链接数，0-20，0表示不启用）",
             "不带任何前缀会直接当作【屏蔽关键词】添加（此时可用中文逗号或顿号分隔）。",
             "",
             "若需从空规则开始（去除默认规则）：请在任意一行单独写 清空默认 或 CLEAR_DEFAULTS",
