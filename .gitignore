@@ -7,6 +7,7 @@
 
 # Cloudflare local state
 .wrangler/
+.vscode/
 
 # Logs and temp artifacts
 *.log
