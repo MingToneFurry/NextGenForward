@@ -143,6 +143,8 @@ Grok 相关可选变量：
 | `GROK_MODEL` | `grok-4.1-expert` | 使用的模型名 |
 | `GROK_TIMEOUT_MS` | `12000` | 请求超时，默认 12000ms，最小按代码约束回退到 12000ms |
 | `QUIZ_GROK_ENABLED` | `true` | 是否启用在线出题，默认 `true` |
+| `GROK_VISION_ENABLED` | `true` | 是否启用图片视觉识别（仅图片） |
+| `GROK_IMAGE_MAX_BYTES` | `1048576` | 识图下载上限字节数，默认 1MB |
 
 ### 步骤 3：激活 Webhook（必做）
 

@@ -659,6 +659,65 @@ function extractTextFromTelegramMessage(msg) {
   return text.trim();
 }
 
+function isCrossChannelReplyMessage(msg) {
+  if (!msg || typeof msg !== "object") return false;
+
+  if (msg.sender_chat && msg.sender_chat.type === "channel" && msg.is_automatic_forward) return true;
+  if (msg.forward_origin && typeof msg.forward_origin.type === "string" && /channel/i.test(msg.forward_origin.type)) return true;
+
+  const reply = msg.reply_to_message;
+  if (reply) {
+    if (reply.chat && reply.chat.type === "channel") return true;
+    if (reply.sender_chat && reply.sender_chat.type === "channel") return true;
+    if (reply.is_automatic_forward && reply.sender_chat && reply.sender_chat.type === "channel") return true;
+    if (reply.forward_origin && typeof reply.forward_origin.type === "string" && /channel/i.test(reply.forward_origin.type)) return true;
+  }
+
+  const externalReply = msg.external_reply;
+  if (externalReply) {
+    if (externalReply.chat && externalReply.chat.type === "channel") return true;
+    if (externalReply.sender_chat && externalReply.sender_chat.type === "channel") return true;
+    const origin = externalReply.origin;
+    if (origin) {
+      if (origin.chat && origin.chat.type === "channel") return true;
+      if (origin.sender_chat && origin.sender_chat.type === "channel") return true;
+      if (typeof origin.type === "string" && /channel/i.test(origin.type)) return true;
+    }
+  }
+
+  return false;
+}
+
+function highRiskSpamVerdict(text) {
+  const t = String(text || "").trim();
+  if (!t) return null;
+
+  const handleCount = (t.match(/@\w{4,}(?:_bot)?\b/gi) || []).length;
+  const hasHandle = handleCount > 0;
+  const hasBotHandle = /@\w{4,}_bot\b/i.test(t);
+  const hasSalesLexicon = /(供应商品|出售|售卖|补货通知群|自助取号|接码|实卡|飞机号|tg号|会员号|号商|卡商|二次号|新号|老号|价格透明|不割韭菜)/i.test(t);
+  const hasContactCallToAction = /(购买联系|联系(?:飞机|电报|tg|telegram|客服)|私聊|下单|合作(?:分成)?|分成|通知群|补货|自助取号)/i.test(t);
+  const hasIllicitLexicon = /(盗u|过红|洗钱|跑分|黑五类|破解星链|不担心ip被|jc追踪|全部盗走|只需要\s*\d+\s*u)/i.test(t);
+
+  const countryCodeMatches = t.match(/[+＋]\s?\d{1,4}\s*[-~—–]?\s*(?:[A-Za-z\u4e00-\u9fa5]{1,12})?/g) || [];
+  const hasRegionFlag = /[\u{1F1E6}-\u{1F1FF}]{2}/u.test(t);
+  const hasBulkCountryCodeList = countryCodeMatches.length >= 6 && (hasRegionFlag || /(美国|加拿大|印度|香港|越南|日本|英国|土耳其|葡萄牙|西班牙|沙特|阿富汗|捷克|多米尼加)/.test(t));
+
+  if (hasBulkCountryCodeList && (hasSalesLexicon || hasHandle || hasContactCallToAction)) {
+    return { is_spam: true, score: 0.99, reason: "rule:bulk_account_trade" };
+  }
+
+  if (hasIllicitLexicon && (hasHandle || hasContactCallToAction)) {
+    return { is_spam: true, score: 0.99, reason: "rule:illicit_promo" };
+  }
+
+  if (hasHandle && hasBotHandle && (hasSalesLexicon || hasIllicitLexicon)) {
+    return { is_spam: true, score: 0.97, reason: "rule:bot_contact_promo" };
+  }
+
+  return null;
+}
+
 function countUrls(text) {
   if (!text) return 0;
   const m = text.match(/https?:\/\/\S+|t\.me\/\S+|telegram\.me\/\S+/gi);
@@ -704,6 +763,11 @@ function ruleBasedSpamVerdict(text, rules) {
     }
   }
 
+  const highRisk = highRiskSpamVerdict(t);
+  if (highRisk && highRisk.is_spam) {
+    return highRisk;
+  }
+
   const urlCount = countUrls(t);
   if (rules.max_links > 0 && urlCount >= rules.max_links) {
     return { is_spam: true, score: 0.9, reason: `rule:max_links:${urlCount}` };
@@ -724,28 +788,214 @@ function ruleBasedSpamVerdict(text, rules) {
   return { is_spam: false, score: 0.0, reason: "rule:no_match" };
 }
 
-async function aiSpamVerdict(env, text, rules) {
+function normalizeTelegramApiBase(env) {
+  let base = env.API_BASE || "https://api.telegram.org";
+  if (String(base).startsWith("http://")) base = String(base).replace("http://", "https://");
+  try {
+    new URL(`${base}/test`);
+  } catch (_) {
+    base = "https://api.telegram.org";
+  }
+  return String(base).replace(/\/+$/, "");
+}
+
+function pickModerationImageFileId(msg) {
+  if (!msg || typeof msg !== "object") return null;
+
+  if (Array.isArray(msg.photo) && msg.photo.length > 0) {
+    const best = msg.photo[msg.photo.length - 1];
+    if (best && best.file_id) return String(best.file_id);
+  }
+
+  if (msg.document && msg.document.file_id) {
+    const mime = String(msg.document.mime_type || "").toLowerCase();
+    if (mime.startsWith("image/")) return String(msg.document.file_id);
+  }
+
+  return null;
+}
+
+function arrayBufferToBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  const chunkSize = 0x8000;
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
+async function buildModerationImageDataUrl(env, msg) {
+  const visionEnabled = readEnvBoolean(env, "GROK_VISION_ENABLED", true);
+  if (!visionEnabled) return null;
+
+  const fileId = pickModerationImageFileId(msg);
+  if (!fileId) return null;
+
+  const maxBytesRaw = readEnvString(env, "GROK_IMAGE_MAX_BYTES", "1048576");
+  const parsedMax = Math.floor(Number(maxBytesRaw));
+  const maxBytes = Number.isFinite(parsedMax) && parsedMax >= 262144 ? Math.min(parsedMax, 3145728) : 1048576;
+
+  try {
+    const fileRes = await tgCall(env, "getFile", { file_id: fileId }, { timeout: 8000, maxRetries: 1 });
+    const filePath = fileRes?.result?.file_path;
+    if (!filePath) return null;
+
+    const base = normalizeTelegramApiBase(env);
+    const fileUrl = `${base}/file/bot${env.BOT_TOKEN}/${filePath}`;
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    let resp;
+    try {
+      resp = await fetch(fileUrl, { method: "GET", signal: controller.signal });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    if (!resp || !resp.ok) return null;
+
+    const contentLength = Number(resp.headers.get("content-length"));
+    if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+      Logger.info("grok_image_skipped_too_large", { size: contentLength, maxBytes });
+      return null;
+    }
+
+    const arr = await resp.arrayBuffer();
+    if (!arr || arr.byteLength <= 0 || arr.byteLength > maxBytes) {
+      Logger.info("grok_image_skipped_invalid_size", { size: arr ? arr.byteLength : 0, maxBytes });
+      return null;
+    }
+
+    const contentType = String(resp.headers.get("content-type") || "").toLowerCase();
+    const mime = contentType.startsWith("image/") ? contentType.split(";")[0] : "image/jpeg";
+    const b64 = arrayBufferToBase64(arr);
+    return `data:${mime};base64,${b64}`;
+  } catch (e) {
+    Logger.warn("grok_image_prepare_failed", {
+      error: String((e && e.message) ? e.message : e)
+    });
+    return null;
+  }
+}
+
+async function aiSpamVerdict(env, msg, text, rules) {
   const grokCfg = getGrokModerationConfig(env);
   if (!grokCfg.ready) return null;
 
   const rawText = String(text || "").trim();
+  const imageDataUrl = await buildModerationImageDataUrl(env, msg);
+  const hasVisual = !!imageDataUrl;
   const t = rawText || "[NO_TEXT_CONTENT]";
 
-  const systemPrompt =
-    "你是垃圾消息分类器。判断文本是否为垃圾消息（广告/引流/诈骗/推广/刷单/兼职/币圈/USDT 等）。" +
-    "必须只输出 JSON 对象，至少包含键 is_spam(boolean)。可选键：confidence(0-1), category(string), signals(string[]).";
+  if (!rawText && !hasVisual) return null;
 
-  const userPayload = { text: t.slice(0, 2000), rules_hint: rules || {} };
+  const systemPrompt = [
+    "你是“铁面广告风控管理员”，只负责在 Telegram 场景下精准识别广告、引流、诈骗、黑灰产消息。",
+    "",
+    "广告/垃圾定义（满足任一核心意图即可判定）：",
+    "- 商业推广、用户导流、交易诱导、诈骗或违法黑灰产意图。",
+    "- 包括但不限于：产品销售、虚拟币/投资/刷单/返利、账号/号码/卡商交易、色情/赌博/假药、跑分/洗钱/盗U。",
+    "",
+    "核心原则：",
+    "1) 高召回所有明显垃圾；",
+    "2) 严格避免误伤正常聊天、技术讨论、新闻分享、反诈科普、朋友间无交易导向的推荐。",
+    "",
+    "请按以下流程进行内部判断（不要输出过程）：",
+    "Step1 扫描文本 + 图片 + 可见元信息（联系方式、链接、二维码、旗帜/区号列表、优惠词、来源信息）",
+    "Step2 判断是否存在交易/导流/违法意图（仅有联系方式但无交易意图，不可直接判垃圾）",
+    "Step3 统计命中信号的数量与强度",
+    "Step4 结合避免误伤原则输出最终结论",
+    "",
+    "高风险核心信号（任一条高度可疑）：",
+    "- 账号/号码/实卡/接码/会员号/号商/卡商交易与推广",
+    "- @xxx/bot/频道/群/链接/二维码 + 购买/下单/补货/合作/咨询/私聊有福利",
+    "- 投资/虚拟币/刷单/返利/高收益承诺",
+    "- 跑分/洗钱/过红/盗U/黑五类/规避追踪",
+    "- 色情/赌博/假药/壮阳/减肥等敏感品类推广",
+    "- 限时抢购/爆款/秒杀/加群领红包/抽奖等营销话术",
+    "",
+    "辅助信号（需要与核心信号或多条叠加）：",
+    "- 大量国家区号/旗帜列表 + 出售/联系文案",
+    "- 重复刷屏、异常符号/emoji填充、拆字/拼音/代称规避",
+    "- 跨频道自动转发、来源异常、明显复制粘贴",
+    "- 图片中出现二维码、联系方式、商品图+价格+联系方式",
+    "- 外部短链接 + 商业关键词",
+    "",
+    "避免误伤铁律（命中则优先判正常）：",
+    "- 纯技术讨论、新闻转述、反诈科普、教程，且无交易/导流意图",
+    "- 闲聊中偶然提到联系方式或平台词，但无推广交易动作",
+    "- 正常求助/吐槽/资源讨论且无商业意图",
+    "",
+    "只允许输出纯 JSON，不要输出额外文字、解释、Markdown。",
+    "JSON 必须是：",
+    "{",
+    "  \"is_spam\": boolean,",
+    "  \"confidence\": number,",
+    "  \"category\": string,",
+    "  \"signals\": string[]",
+    "}",
+    "category 仅允许以下之一：",
+    "[\"广告推广\",\"引流导购\",\"诈骗诱导\",\"黑灰产交易\",\"正常聊天\",\"可疑边缘\"]",
+    "",
+    "confidence 映射（严格遵守）：",
+    "- 2个及以上核心信号：0.92-1.00",
+    "- 1个核心 + 任意辅助：0.80-0.91",
+    "- 仅1个核心：0.70-0.79",
+    "- 仅辅助信号（>=2）：0.50-0.69",
+    "- 仅1个辅助或轻微可疑：0.36-0.49",
+    "- 触发避免误伤铁律或无信号：0.00-0.35"
+  ].join("\n");
+
+  const urlCount = countUrls(rawText);
+  const handleCount = (rawText.match(/@\w{4,}(?:_bot)?\b/gi) || []).length;
+  const crossChannelHint = isCrossChannelReplyMessage(msg);
+  const userPayload = {
+    text: t.slice(0, 2000),
+    rules_hint: rules || {},
+    meta_hint: {
+      url_count: urlCount,
+      handle_count: handleCount,
+      cross_channel_reply: crossChannelHint,
+      has_external_reply: !!(msg && msg.external_reply),
+      has_forward_origin: !!(msg && msg.forward_origin),
+      sender_chat_is_channel: !!(msg && msg.sender_chat && msg.sender_chat.type === "channel")
+    },
+    media_hint: {
+      has_photo: !!(msg && Array.isArray(msg.photo) && msg.photo.length),
+      has_video: !!(msg && msg.video),
+      has_document: !!(msg && msg.document),
+      has_audio: !!(msg && msg.audio),
+      has_media_group: !!(msg && msg.media_group_id)
+    }
+  };
 
   function normalizeVerdict(obj) {
     if (!obj || typeof obj !== "object") return null;
     const isSpam = (typeof obj.is_spam === "boolean") ? obj.is_spam : null;
     if (isSpam === null) return null;
-    const conf = Number(obj.confidence);
-    // 若模型未给出 confidence：根据 is_spam 给一个保守但可用的默认值，避免“只返回 is_spam 导致永远过不了阈值”
-    const confidence = (Number.isFinite(conf) && conf >= 0 && conf <= 1) ? conf : (isSpam ? 0.75 : 0.25);
-    const category = (typeof obj.category === "string" && obj.category.trim()) ? obj.category.trim() : "unknown";
-    const signals = Array.isArray(obj.signals) ? obj.signals.filter(x => typeof x === "string").slice(0, 8) : [];
+    const rawConf = Number(obj.confidence);
+    let confidence;
+    if (Number.isFinite(rawConf)) {
+      let c = rawConf;
+      if (c > 1 && c <= 100) c = c / 100;
+      c = Math.max(0, Math.min(1, c));
+      confidence = Math.round(c * 100) / 100;
+    } else {
+      confidence = isSpam ? 0.75 : 0.25;
+    }
+
+    const categoryRaw = (typeof obj.category === "string" && obj.category.trim()) ? obj.category.trim() : "";
+    const allowedCategories = new Set(["广告推广", "引流导购", "诈骗诱导", "黑灰产交易", "正常聊天", "可疑边缘"]);
+    const category = allowedCategories.has(categoryRaw)
+      ? categoryRaw
+      : (isSpam ? "可疑边缘" : "正常聊天");
+
+    const signals = Array.isArray(obj.signals)
+      ? obj.signals.filter(x => typeof x === "string").map(x => x.trim()).filter(Boolean).slice(0, 12)
+      : [];
+
     return {
       is_spam: !!isSpam,
       score: confidence,
@@ -754,26 +1004,103 @@ async function aiSpamVerdict(env, text, rules) {
     };
   }
 
+  function extractJsonObjectsFromText(s, maxCount = 10) {
+    const text = String(s || "");
+    const out = [];
+    let depth = 0;
+    let start = -1;
+    let inString = false;
+    let escaped = false;
+
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (ch === "\\") {
+          escaped = true;
+          continue;
+        }
+        if (ch === "\"") {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (ch === "\"") {
+        inString = true;
+        continue;
+      }
+
+      if (ch === "{") {
+        if (depth === 0) start = i;
+        depth += 1;
+        continue;
+      }
+
+      if (ch === "}" && depth > 0) {
+        depth -= 1;
+        if (depth === 0 && start >= 0) {
+          out.push(text.slice(start, i + 1));
+          if (out.length >= maxCount) break;
+          start = -1;
+        }
+      }
+    }
+
+    return out;
+  }
+
+  function parseCandidateJson(candidate) {
+    try {
+      const parsed = JSON.parse(candidate);
+      return parsed && typeof parsed === "object" ? parsed : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   function tryParseJsonFromText(s) {
     const str = String(s || "").trim();
     if (!str) return null;
-    // 去掉 ```json ... ``` 包裹
+
+    const fencedBlocks = [];
+    const fencedRegex = /```(?:json)?\s*([\s\S]*?)```/gi;
+    let fm;
+    while ((fm = fencedRegex.exec(str)) !== null) {
+      if (fm[1] && fm[1].trim()) fencedBlocks.push(fm[1].trim());
+    }
+
     const cleaned = str
       .replace(/^```(?:json)?\s*/i, "")
       .replace(/```\s*$/i, "")
       .trim();
-    try {
-      return JSON.parse(cleaned);
-    } catch (_) {
-      // 尝试截取第一个 { ... }
-      const m = cleaned.match(/\{[\s\S]*\}/);
-      if (!m) return null;
-      try {
-        return JSON.parse(m[0]);
-      } catch (_) {
-        return null;
+
+    const candidateTexts = [];
+    if (cleaned) candidateTexts.push(cleaned);
+    for (const fb of fencedBlocks) candidateTexts.push(fb);
+
+    const jsonFragments = [];
+    for (const c of candidateTexts) {
+      for (const frag of extractJsonObjectsFromText(c, 12)) {
+        jsonFragments.push(frag);
       }
     }
+
+    const allCandidates = [...candidateTexts, ...jsonFragments];
+    let fallbackObj = null;
+
+    for (const c of allCandidates) {
+      const obj = parseCandidateJson(c);
+      if (!obj) continue;
+      if (Object.prototype.hasOwnProperty.call(obj, "is_spam")) return obj;
+      if (!fallbackObj) fallbackObj = obj;
+    }
+
+    return fallbackObj;
   }
 
   function extractAssistantContent(chatCompletionsResp) {
@@ -817,13 +1144,72 @@ async function aiSpamVerdict(env, text, rules) {
       const data = await resp.json();
       const content = extractAssistantContent(data);
       const parsed = (typeof content === "string") ? tryParseJsonFromText(content) : content;
+      if (!parsed) {
+        Logger.warn("grok_spam_json_not_found", {
+          content_preview: String(content || "").slice(0, 240)
+        });
+      }
       return normalizeVerdict(parsed);
     } finally {
       clearTimeout(timeoutId);
     }
   }
 
-  const basePayload = {
+  async function runPayload(basePayload) {
+    // 模型可能返回“思考+JSON”，因此：
+    // 1) 先在文本里提取 JSON；2) 失败后重试 3 次；3) 全失败则返回 null（上层放行）
+    const maxRetries = 3;
+    const maxAttempts = maxRetries + 1;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      let hadTransportError = false;
+
+      // 1) 首选：要求 JSON 对象输出
+      try {
+        const verdict = await callGrok({
+          ...basePayload,
+          response_format: { type: "json_object" }
+        });
+        if (verdict) return verdict;
+      } catch (e1) {
+        hadTransportError = true;
+        Logger.warn("grok_spam_json_object_failed", {
+          attempt,
+          maxAttempts,
+          error: String((e1 && e1.message) ? e1.message : e1)
+        });
+      }
+
+      // 2) 回退：不强制 response_format，继续从文本里提取 JSON
+      try {
+        const verdict2 = await callGrok(basePayload);
+        if (verdict2) return verdict2;
+      } catch (e2) {
+        hadTransportError = true;
+        Logger.warn("grok_spam_fallback_failed", {
+          attempt,
+          maxAttempts,
+          error: String((e2 && e2.message) ? e2.message : e2)
+        });
+      }
+
+      if (attempt < maxAttempts) {
+        const delayMs = Math.min(2000, 300 * Math.pow(2, attempt - 1));
+        Logger.info("grok_spam_retry_scheduled", {
+          attempt,
+          maxAttempts,
+          delayMs,
+          reason: hadTransportError ? "transport_or_api_error" : "json_parse_failed"
+        });
+        await new Promise(r => setTimeout(r, delayMs));
+      }
+    }
+
+    Logger.warn("grok_spam_all_attempts_failed_allow_pass", { maxAttempts });
+    return null;
+  }
+
+  const textOnlyPayload = {
     model: grokCfg.model,
     messages: [
       { role: "system", content: systemPrompt },
@@ -832,45 +1218,45 @@ async function aiSpamVerdict(env, text, rules) {
     temperature: 0
   };
 
-  // 1) 首选：要求 JSON 对象输出
-  try {
-    const verdict = await callGrok({
-      ...basePayload,
-      response_format: { type: "json_object" }
-    });
-    if (verdict) return verdict;
-  } catch (e1) {
-    Logger.warn("grok_spam_json_object_failed", {
-      error: String((e1 && e1.message) ? e1.message : e1)
-    });
+  if (hasVisual) {
+    const visualPayload = {
+      model: grokCfg.model,
+      messages: [
+        { role: "system", content: systemPrompt },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: JSON.stringify(userPayload) },
+            { type: "image_url", image_url: { url: imageDataUrl } }
+          ]
+        }
+      ],
+      temperature: 0
+    };
+
+    const visualVerdict = await runPayload(visualPayload);
+    if (visualVerdict) return visualVerdict;
   }
 
-  // 2) 回退：不强制 response_format，尽量从文本提取 JSON
-  try {
-    const verdict2 = await callGrok(basePayload);
-    if (verdict2) return verdict2;
-  } catch (e2) {
-    Logger.warn("grok_spam_fallback_failed", {
-      error: String((e2 && e2.message) ? e2.message : e2)
-    });
-  }
-
-  return null;
+  return await runPayload(textOnlyPayload);
 }
 
 async function classifySpamOptional(env, msg) {
   const enabled = await getGlobalSpamFilterEnabled(env);
+  if (!enabled) {
+    return { is_spam: false, score: 0.0, reason: "spam_filter_disabled", ai_used: false };
+  }
+
+  if (isCrossChannelReplyMessage(msg)) {
+    return { is_spam: true, score: 1.0, reason: "rule:cross_channel_reply", ai_used: false };
+  }
 
   const rules = await getGlobalSpamFilterRules(env);
   const text = extractTextFromTelegramMessage(msg);
   const ruleVerdict = ruleBasedSpamVerdict(text, rules);
 
   // 无论本地规则结果如何，都调用一次 Grok 垃圾识别（满足“每条请求都做一次 AI 判断”）
-  const ai = await aiSpamVerdict(env, text, rules);
-
-  if (!enabled) {
-    return { is_spam: false, score: 0.0, reason: "spam_filter_disabled", ai_used: !!ai };
-  }
+  const ai = await aiSpamVerdict(env, msg, text, rules);
 
   // 放行规则优先：仍会执行一次 Grok 判断，但最终放行
   if (typeof ruleVerdict.reason === "string" && ruleVerdict.reason.startsWith("allow_")) {
