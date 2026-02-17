@@ -68,7 +68,7 @@ const CONFIG = {
     TOPIC_DELETE_RETRY_DELAY_MS: 1000, // 话题删除重试延迟（毫秒）
 };
 
-const VERIFY_MODE_DEFAULT = "local_quiz"; // 默认：本地题库验证（Turnstile 可选）
+const VERIFY_MODE_DEFAULT = "local_quiz"; // 默认：本地题库验证（可选 turnstile / disabled）
 
 
 // Turnstile 是否已配置（同时需要 Site Key 与 Secret Key）
@@ -76,6 +76,48 @@ function hasTurnstileBinding(env) {
   const site = (env && env.CF_TURNSTILE_SITE_KEY ? String(env.CF_TURNSTILE_SITE_KEY) : "").trim();
   const secret = (env && env.CF_TURNSTILE_SECRET_KEY ? String(env.CF_TURNSTILE_SECRET_KEY) : "").trim();
   return !!(site && secret);
+}
+
+function readEnvString(env, key, fallback = "") {
+  const fromBinding = (env && env[key] !== undefined && env[key] !== null) ? String(env[key]).trim() : "";
+  if (fromBinding) return fromBinding;
+  try {
+    const fromProcess = (globalThis && globalThis.process && globalThis.process.env && globalThis.process.env[key])
+      ? String(globalThis.process.env[key]).trim()
+      : "";
+    if (fromProcess) return fromProcess;
+  } catch (_) {}
+  return fallback;
+}
+
+function readEnvBoolean(env, key, fallback = false) {
+  const raw = readEnvString(env, key, "");
+  if (!raw) return !!fallback;
+  const v = raw.toLowerCase();
+  if (v === "1" || v === "true" || v === "on" || v === "yes") return true;
+  if (v === "0" || v === "false" || v === "off" || v === "no") return false;
+  return !!fallback;
+}
+
+function getGrokModerationConfig(env) {
+  const apiKey = readEnvString(env, "GROK_API_KEY", "");
+  const apiUrl = readEnvString(env, "GROK_API_URL", "");
+  const model = readEnvString(env, "GROK_MODEL", "");
+  const timeoutRaw = readEnvString(env, "GROK_TIMEOUT_MS", "12000");
+  const timeoutMsNum = Math.floor(Number(timeoutRaw));
+  const timeoutMs = Number.isFinite(timeoutMsNum) && timeoutMsNum >= 3000 ? timeoutMsNum : 12000;
+  const ready = !!(apiKey && apiUrl && model);
+  return { apiKey, apiUrl, model, timeoutMs, ready };
+}
+
+function hasGrokModerationConfig(env) {
+  return getGrokModerationConfig(env).ready;
+}
+
+function getVerifyModeText(mode) {
+  if (mode === "disabled") return "🚫 已关闭";
+  if (mode === "turnstile") return "☁️ Cloudflare 验证";
+  return "📚 本地题库验证";
 }
 
 
@@ -120,12 +162,169 @@ const LOCAL_QUIZ_QUESTIONS = [
 ];
 
 
-// 本地题库：单题有效期与触发频率限制
+// 本地题库：在线出题 + 单题有效期与触发频率限制
+const LOCAL_QUIZ_PASS_COUNT = 3;                     // 累计答对 N 题即通过
 const LOCAL_QUIZ_CHALLENGE_TTL_SECONDS = 60;          // 单题 1 分钟有效期（KV 最小 60）
 const LOCAL_QUIZ_CHALLENGE_VALID_MS = 60 * 1000;      // 单题有效期（毫秒）
 const LOCAL_QUIZ_TRIGGER_WINDOW_SECONDS = 300;        // 5 分钟窗口
 const LOCAL_QUIZ_TRIGGER_LIMIT = 3;                   // 5 分钟最多触发 3 次
 const LOCAL_QUIZ_TRIGGER_KEY_PREFIX = "quiz_trig:";   // KV 记录：触发次数
+
+function parseJsonLoose(text) {
+  const str = String(text || "").trim();
+  if (!str) return null;
+  const cleaned = str
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/```\s*$/i, "")
+    .trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch (_) {
+    const m = cleaned.match(/\{[\s\S]*\}/);
+    if (!m) return null;
+    try {
+      return JSON.parse(m[0]);
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
+function normalizeQuizOptionText(value) {
+  const s = String(value || "").replace(/\s+/g, " ").trim();
+  if (!s) return null;
+  if (s.length > 24) return null;
+  if (/^(以上都|都不|都对|无法判断)/.test(s)) return null;
+  return s;
+}
+
+function normalizeQuizQuestion(payload) {
+  if (!payload || typeof payload !== "object") return null;
+
+  const rawQ = (typeof payload.q === "string") ? payload.q : payload.question;
+  const q = String(rawQ || "").replace(/\s+/g, " ").trim();
+  if (!q || q.length < 4 || q.length > 80) return null;
+
+  const rawOpts = Array.isArray(payload.opts) ? payload.opts : payload.options;
+  if (!Array.isArray(rawOpts) || rawOpts.length !== 4) return null;
+
+  const opts = rawOpts.map(normalizeQuizOptionText);
+  if (opts.some(x => !x)) return null;
+
+  const dedupe = new Set(opts.map(x => x.toLowerCase()));
+  if (dedupe.size !== 4) return null;
+
+  let a = payload.a;
+  if (typeof a === "string") {
+    const t = a.trim().toUpperCase();
+    if (/^[0-3]$/.test(t)) a = parseInt(t, 10);
+    else if (/^[1-4]$/.test(t)) a = parseInt(t, 10) - 1;
+    else if (t === "A") a = 0;
+    else if (t === "B") a = 1;
+    else if (t === "C") a = 2;
+    else if (t === "D") a = 3;
+    else {
+      const byText = opts.findIndex(x => x === a.trim());
+      a = byText >= 0 ? byText : NaN;
+    }
+  }
+
+  const ai = Math.floor(Number(a));
+  if (!Number.isFinite(ai) || ai < 0 || ai > 3) return null;
+
+  return { q, opts, a: ai };
+}
+
+function extractFirstChoiceContent(respObj) {
+  const msg = respObj?.choices?.[0]?.message;
+  if (!msg) return null;
+  const c = msg.content;
+  if (typeof c === "string") return c;
+  if (Array.isArray(c)) {
+    return c.map(part => {
+      if (typeof part === "string") return part;
+      if (part && typeof part.text === "string") return part.text;
+      if (part && typeof part.content === "string") return part.content;
+      return "";
+    }).join("").trim();
+  }
+  if (c && typeof c === "object") return c;
+  return null;
+}
+
+async function generateOnlineQuizQuestion(env, userId, solvedCount = 0) {
+  const enabled = readEnvBoolean(env, "QUIZ_GROK_ENABLED", true);
+  if (!enabled) return null;
+
+  const grokCfg = getGrokModerationConfig(env);
+  if (!grokCfg.ready) return null;
+
+  const systemPrompt =
+    "你是人机验证出题器。请生成一道普通人可轻松回答的中文单选题。" +
+    "题目必须是常识/简单算术/日常认知，严禁冷知识、歧义、脑筋急转弯。" +
+    "你必须只输出 JSON：{q:string, opts:string[4], a:number}，其中 a 为 0-3。";
+
+  const userPrompt = JSON.stringify({
+    target: "telegram_human_verify",
+    language: "zh-CN",
+    difficulty: "very_easy",
+    allow_topics: ["基础数学", "生活常识", "方向时间", "字母数字", "简单逻辑"],
+    disallow_topics: ["专业知识", "文学典故", "地域冷门", "抽象谜题"],
+    solved_count: Math.max(0, Math.floor(Number(solvedCount || 0))),
+    pass_count: LOCAL_QUIZ_PASS_COUNT,
+    user_id: Number(userId || 0)
+  });
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), grokCfg.timeoutMs);
+  try {
+    const resp = await fetch(grokCfg.apiUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${grokCfg.apiKey}`
+      },
+      body: JSON.stringify({
+        model: grokCfg.model,
+        temperature: 0.2,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt }
+        ]
+      }),
+      signal: controller.signal
+    });
+
+    if (!resp.ok) {
+      let body = "";
+      try { body = await resp.text(); } catch (_) {}
+      Logger.warn("online_quiz_request_failed", {
+        status: resp.status,
+        body: String(body || "").slice(0, 200)
+      });
+      return null;
+    }
+
+    const json = await resp.json();
+    const content = extractFirstChoiceContent(json);
+    const parsed = (typeof content === "string") ? parseJsonLoose(content) : content;
+    const normalized = normalizeQuizQuestion(parsed);
+    if (normalized) return normalized;
+
+    Logger.warn("online_quiz_parse_failed", {
+      content_preview: String(content || "").slice(0, 200)
+    });
+    return null;
+  } catch (e) {
+    Logger.warn("online_quiz_exception", {
+      error: String(e && (e.message || e))
+    });
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
 
 // 触发频率限制：5分钟最多3次（写入频率很低，使用 KV 以跨 PoP 一致）
 async function consumeLocalQuizTrigger(userId, env) {
@@ -159,6 +358,7 @@ async function getGlobalVerifyMode(env) {
   const raw = await kvGetText(env, GLOBAL_VERIFY_MODE_KEY, CONFIG.KV_CRITICAL_CACHE_TTL);
   const mode = (raw || "").toString().trim();
 
+  if (mode === "disabled") return "disabled";
   if (mode === "local_quiz") return "local_quiz";
   if (mode === "turnstile") return hasTurnstileBinding(env) ? "turnstile" : "local_quiz";
 
@@ -170,7 +370,7 @@ async function getGlobalVerifyMode(env) {
 
 async function setGlobalVerifyMode(env, mode) {
   const m = (mode || "").toString().trim();
-  if (m !== "turnstile" && m !== "local_quiz") return false;
+  if (m !== "turnstile" && m !== "local_quiz" && m !== "disabled") return false;
 
   // turnstile 作为可选能力：未配置则拒绝切换
   if (m === "turnstile" && !hasTurnstileBinding(env)) {
@@ -200,15 +400,10 @@ const DEFAULT_SPAM_RULES = {
   allow_regexes: [],
   ai: {
     enabled: true,
-    model: "@cf/meta/llama-3.1-8b-instruct-fast",
     // v1.6.1: AI 阈值默认更激进（更愿意拦截）
     threshold: 0.65
   }
 };
-
-function hasWorkersAIBinding(env) {
-  return !!(env && env.AI && typeof env.AI.run === "function");
-}
 
 async function getGlobalSpamFilterEnabled(env) {
   const raw = await kvGetText(env, GLOBAL_SPAM_FILTER_ENABLED_KEY, CONFIG.KV_CRITICAL_CACHE_TTL);
@@ -262,9 +457,6 @@ function sanitizeSpamRules(rules) {
     allow_regexes: sanitizeStringArray(r.allow_regexes ?? DEFAULT_SPAM_RULES.allow_regexes, 80),
     ai: {
       enabled: !!(r.ai && typeof r.ai === "object" ? r.ai.enabled : DEFAULT_SPAM_RULES.ai.enabled),
-      model: (r.ai && typeof r.ai === "object" && typeof r.ai.model === "string" && r.ai.model.trim())
-        ? r.ai.model.trim()
-        : DEFAULT_SPAM_RULES.ai.model,
       // v1.6.0: 统一阈值为 0.65（不再从 KV 读取旧值），避免升级后仍沿用 0.85
       threshold: AI_THRESHOLD
     }
@@ -373,7 +565,7 @@ function promptToSpamRules(promptText, baseRules) {
   const useDefaults = !clearDefaults;
 
   // v1.6.0: “清空默认”只清空本地规则（关键词/正则/链接数），不再误把 AI 一起关掉。
-  // 同时：AI 是否启用由是否存在 env.AI 绑定决定（见 classifySpamOptional / aiSpamVerdict），这里仅保留 model/threshold 配置。
+  // Grok 接口参数由环境变量控制，这里仅保留 AI 阈值配置。
   const base = sanitizeSpamRules(baseRules || DEFAULT_SPAM_RULES);
   let rules = sanitizeSpamRules(useDefaults ? base : {
     version: 1,
@@ -533,35 +725,17 @@ function ruleBasedSpamVerdict(text, rules) {
 }
 
 async function aiSpamVerdict(env, text, rules) {
-  // v1.6.0: AI 是否启用只取决于是否绑定了 Workers AI（env.AI.run 可用），不再受 rules.ai.enabled 影响
-  if (!hasWorkersAIBinding(env)) return null;
+  const grokCfg = getGrokModerationConfig(env);
+  if (!grokCfg.ready) return null;
 
-  const t = String(text || "").trim();
-  if (!t) return null;
-
-  const aiCfg = (rules && rules.ai && typeof rules.ai === "object") ? rules.ai : DEFAULT_SPAM_RULES.ai;
-  const model = (aiCfg && typeof aiCfg.model === "string" && aiCfg.model.trim()) ? aiCfg.model.trim() : DEFAULT_SPAM_RULES.ai.model;
-
-  // JSON Mode 可能无法稳定满足严格 schema（缺字段、格式错误、直接抛错），所以：
-  // 1) schema 只强制 is_spam，其他字段给默认值
-  // 2) json_schema 失败后回退 json_object，再失败则尝试从文本里提取 JSON
-  const schema = {
-    type: "object",
-    additionalProperties: true,
-    properties: {
-      is_spam: { type: "boolean" },
-      confidence: { type: "number", minimum: 0, maximum: 1 },
-      category: { type: "string" },
-      signals: { type: "array", items: { type: "string" }, maxItems: 8 }
-    },
-    required: ["is_spam"]
-  };
+  const rawText = String(text || "").trim();
+  const t = rawText || "[NO_TEXT_CONTENT]";
 
   const systemPrompt =
     "你是垃圾消息分类器。判断文本是否为垃圾消息（广告/引流/诈骗/推广/刷单/兼职/币圈/USDT 等）。" +
     "必须只输出 JSON 对象，至少包含键 is_spam(boolean)。可选键：confidence(0-1), category(string), signals(string[]).";
 
-  const userPayload = { text: t.slice(0, 2000) };
+  const userPayload = { text: t.slice(0, 2000), rules_hint: rules || {} };
 
   function normalizeVerdict(obj) {
     if (!obj || typeof obj !== "object") return null;
@@ -602,60 +776,83 @@ async function aiSpamVerdict(env, text, rules) {
     }
   }
 
-  // 1) 首选：json_schema
-  try {
-    const out = await env.AI.run(model, {
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: JSON.stringify(userPayload) }
-      ],
-      response_format: { type: "json_schema", json_schema: schema }
-    });
-
-    const r = out && out.response ? out.response : null;
-    const parsed = (typeof r === "string") ? tryParseJsonFromText(r) : r;
-    const verdict = normalizeVerdict(parsed);
-    if (verdict) return verdict;
-  } catch (e) {
-    try {
-      console.warn("[spam-ai] json_schema failed; fallback to json_object", String(e && (e.message || e)));
-    } catch (_) {}
+  function extractAssistantContent(chatCompletionsResp) {
+    const message = chatCompletionsResp?.choices?.[0]?.message;
+    if (!message) return null;
+    const content = message.content;
+    if (typeof content === "string") return content;
+    if (content && typeof content === "object" && !Array.isArray(content)) return content;
+    if (Array.isArray(content)) {
+      return content
+        .map(part => {
+          if (typeof part === "string") return part;
+          if (part && typeof part.text === "string") return part.text;
+          if (part && typeof part.content === "string") return part.content;
+          return "";
+        })
+        .join("")
+        .trim();
+    }
+    return null;
   }
 
-  // 2) 回退：json_object
+  async function callGrok(payload) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), grokCfg.timeoutMs);
+    try {
+      const resp = await fetch(grokCfg.apiUrl, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${grokCfg.apiKey}`
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      });
+      if (!resp.ok) {
+        let bodyText = "";
+        try { bodyText = await resp.text(); } catch (_) {}
+        throw new Error(`http_${resp.status}:${String(bodyText || "").slice(0, 200)}`);
+      }
+      const data = await resp.json();
+      const content = extractAssistantContent(data);
+      const parsed = (typeof content === "string") ? tryParseJsonFromText(content) : content;
+      return normalizeVerdict(parsed);
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  const basePayload = {
+    model: grokCfg.model,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: JSON.stringify(userPayload) }
+    ],
+    temperature: 0
+  };
+
+  // 1) 首选：要求 JSON 对象输出
   try {
-    const out2 = await env.AI.run(model, {
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: JSON.stringify(userPayload) }
-      ],
+    const verdict = await callGrok({
+      ...basePayload,
       response_format: { type: "json_object" }
     });
-
-    const r2 = out2 && out2.response ? out2.response : null;
-    const parsed2 = (typeof r2 === "string") ? tryParseJsonFromText(r2) : r2;
-    const verdict2 = normalizeVerdict(parsed2);
-    if (verdict2) return verdict2;
-  } catch (e2) {
-    try {
-      console.warn("[spam-ai] json_object failed; fallback to free-form parse", String(e2 && (e2.message || e2)));
-    } catch (_) {}
+    if (verdict) return verdict;
+  } catch (e1) {
+    Logger.warn("grok_spam_json_object_failed", {
+      error: String((e1 && e1.message) ? e1.message : e1)
+    });
   }
 
-  // 3) 最后兜底：不指定 response_format（模型可能输出自然语言，尽量提取 JSON）
+  // 2) 回退：不强制 response_format，尽量从文本提取 JSON
   try {
-    const out3 = await env.AI.run(model, {
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: JSON.stringify(userPayload) }
-      ]
+    const verdict2 = await callGrok(basePayload);
+    if (verdict2) return verdict2;
+  } catch (e2) {
+    Logger.warn("grok_spam_fallback_failed", {
+      error: String((e2 && e2.message) ? e2.message : e2)
     });
-    const r3 = out3 && out3.response ? out3.response : null;
-    const parsed3 = (typeof r3 === "string") ? tryParseJsonFromText(r3) : r3;
-    const verdict3 = normalizeVerdict(parsed3);
-    if (verdict3) return verdict3;
-  } catch (_) {
-    // 静默失败：最终回落为 null（放行）
   }
 
   return null;
@@ -663,22 +860,34 @@ async function aiSpamVerdict(env, text, rules) {
 
 async function classifySpamOptional(env, msg) {
   const enabled = await getGlobalSpamFilterEnabled(env);
-  if (!enabled) return { is_spam: false, score: 0.0, reason: "spam_filter_disabled", ai_used: false };
 
   const rules = await getGlobalSpamFilterRules(env);
   const text = extractTextFromTelegramMessage(msg);
   const ruleVerdict = ruleBasedSpamVerdict(text, rules);
-  if (ruleVerdict.is_spam) {
-    return { ...ruleVerdict, ai_used: false };
+
+  // 无论本地规则结果如何，都调用一次 Grok 垃圾识别（满足“每条请求都做一次 AI 判断”）
+  const ai = await aiSpamVerdict(env, text, rules);
+
+  if (!enabled) {
+    return { is_spam: false, score: 0.0, reason: "spam_filter_disabled", ai_used: !!ai };
   }
 
-  const ai = await aiSpamVerdict(env, text, rules);
+  // 放行规则优先：仍会执行一次 Grok 判断，但最终放行
+  if (typeof ruleVerdict.reason === "string" && ruleVerdict.reason.startsWith("allow_")) {
+    return { ...ruleVerdict, ai_used: !!ai };
+  }
+
+  if (ruleVerdict.is_spam) {
+    return { ...ruleVerdict, ai_used: !!ai };
+  }
+
   if (ai) {
     // v1.6.0: 阈值统一为 0.65（sanitizeSpamRules 已固定），这里继续沿用 rules.ai.threshold 以保持一致
     const isSpam = ai.is_spam && ai.score >= (rules && rules.ai ? rules.ai.threshold : DEFAULT_SPAM_RULES.ai.threshold);
     return { is_spam: !!isSpam, score: ai.score, reason: ai.reason, ai_used: true };
   }
 
+  // Grok 无有效返回时默认放行，避免因额度/网络问题误伤正常用户
   return { is_spam: false, score: 0.0, reason: "rule:no_match", ai_used: false };
 }
 
@@ -686,7 +895,7 @@ async function notifyUserSpamDropped(env, userId) {
   try {
     await tgCall(env, "sendMessage", {
       chat_id: userId,
-      text: "🗑️ 您刚发送的消息被系统识别为垃圾信息，已被拦截丢弃，您可联系管理员将您加入白名单即可绕过拦截。"
+      text: "🗑️ 您刚发送的消息被系统识别为垃圾信息，已被拦截丢弃。如有误判请联系管理员处理。"
     });
   } catch (_) {}
 }
@@ -747,13 +956,32 @@ async function sendHumanVerification(userId, env, pendingMsgId = null, origin = 
     } catch (_) {}
   }
 
-  if (!provider) {
-    provider = await getGlobalVerifyMode(env);
+  const globalMode = await getGlobalVerifyMode(env);
+  if (globalMode === "disabled") {
+    provider = "disabled";
+  } else if (!provider) {
+    provider = globalMode;
   }
 
   // turnstile 作为可选能力：未配置则自动回落到本地题库
   if (provider === "turnstile" && !hasTurnstileBinding(env)) {
     provider = "local_quiz";
+  }
+
+  if (provider === "disabled") {
+    const verifiedTtl = getVerifiedTtlSeconds(env);
+    if (verifiedTtl > 0) {
+      await kvPut(env, `verified:${userId}`, "1", { expirationTtl: verifiedTtl });
+    } else {
+      await kvPut(env, `verified:${userId}`, "1");
+    }
+    await Promise.allSettled([
+      kvDelete(env, `pending_verify:${userId}`),
+      kvDelete(env, sessionKey),
+      kvDelete(env, `verified_grace:${userId}`),
+      cacheDelete(`verify_notice_sent:${userId}`)
+    ]);
+    return;
   }
 
   if (provider === "local_quiz") {
@@ -775,7 +1003,7 @@ async function sendHumanVerification(userId, env, pendingMsgId = null, origin = 
 
 
 // 发送本地题库验证（纯 Telegram 内联按钮）
-// 规则：单题 1 分钟有效；超时后用户再次发消息或 /start 才触发下一题；5 分钟内最多触发 3 次
+// 规则：单题 1 分钟有效；支持 Grok 在线出题（失败回退本地题库）；累计答对 3 题通过
 async function sendLocalQuizVerification(userId, env, pendingMsgId = null, isStartCommand = false, opts = null) {
   const forceNewQuestion = !!(opts && opts.forceNewQuestion);
   let enableStorage;
@@ -825,12 +1053,14 @@ let shouldSendNotice = false;
     return;
   }
 
-  // 需要发新题（首次或上一题超时）
-  // 5分钟内最多触发 3 次；超过则提示频繁
-  const trig = await consumeLocalQuizTrigger(userId, env);
-  if (!trig.allowed) {
-    await tgCall(env, "sendMessage", { chat_id: userId, text: ERROR_MESSAGES.rate_limit });
-    return;
+  // 新会话才触发频率限制（同一验证会话内多题连答不额外限速）
+  const shouldConsumeTrigger = !sessionData || sessionData.provider !== "local_quiz";
+  if (shouldConsumeTrigger) {
+    const trig = await consumeLocalQuizTrigger(userId, env);
+    if (!trig.allowed) {
+      await tgCall(env, "sendMessage", { chat_id: userId, text: ERROR_MESSAGES.rate_limit });
+      return;
+    }
   }
 
   // 清理旧题（best-effort）
@@ -847,7 +1077,7 @@ let shouldSendNotice = false;
       verificationSent: true,
       enableStorage,
       provider: "local_quiz",
-      quiz: {}
+      quiz: { correctCount: 0 }
     };
   } else {
     sessionData.verificationSent = true;
@@ -855,6 +1085,8 @@ let shouldSendNotice = false;
     sessionData.provider = "local_quiz";
     if (!sessionData.quiz) sessionData.quiz = {};
     if (!Array.isArray(sessionData.pending_ids)) sessionData.pending_ids = [];
+    const c = Math.floor(Number(sessionData.quiz.correctCount || 0));
+    sessionData.quiz.correctCount = (Number.isFinite(c) && c >= 0) ? c : 0;
   }
 
   // 将触发验证的消息加入 pending_ids（KV 持久）
@@ -869,8 +1101,12 @@ let shouldSendNotice = false;
   await kvPut(env, sessionKey, JSON.stringify(sessionData), { expirationTtl: CONFIG.VERIFY_EXPIRE_SECONDS });
   await kvPut(env, `pending_verify:${userId}`, "1", { expirationTtl: CONFIG.VERIFY_EXPIRE_SECONDS });
 
-  // 随机出题
-  const item = LOCAL_QUIZ_QUESTIONS[Math.floor(Math.random() * LOCAL_QUIZ_QUESTIONS.length)];
+  // 优先在线出题（Grok），失败时回退本地题库
+  const solvedCount = Math.floor(Number(sessionData?.quiz?.correctCount || 0));
+  let item = await generateOnlineQuizQuestion(env, userId, solvedCount);
+  if (!item) {
+    item = LOCAL_QUIZ_QUESTIONS[Math.floor(Math.random() * LOCAL_QUIZ_QUESTIONS.length)];
+  }
   const chalKey = `quiz_chal:${verifyId}`;
   const chal = {
     userId,
@@ -897,13 +1133,15 @@ let shouldSendNotice = false;
   }
 
   const intro = isStartCommand
-    ? "🤖 请先完成一次人机验证。"
+    ? "🤖 请先完成人机验证。"
     : "🤖 需要验证后才能继续，请回答下面的问题：";
 
   // 去掉 Markdown 符号，避免出现多余的 **
   await tgCall(env, "sendMessage", {
     chat_id: userId,
     text: `${intro}
+
+✅ 累计答对 ${LOCAL_QUIZ_PASS_COUNT} 题即可通过（当前 ${Math.max(0, solvedCount)}/${LOCAL_QUIZ_PASS_COUNT}）
 
 📝 题目：${item.q}
 
@@ -967,6 +1205,22 @@ async function handleLocalQuizCallback(callbackQuery, env, ctx) {
   // 读会话，确保 provider 绑定（切换不影响正在验证的人）
   const sessionKey = `verify_session:${userId}`;
   const sessionData = await kvGetJSON(env, sessionKey, null, {});
+  const workSession = (sessionData && typeof sessionData === "object")
+    ? sessionData
+    : {
+        userId,
+        pending_ids: [],
+        timestamp: Date.now(),
+        sessionId: secureRandomId(16),
+        verificationSent: true,
+        enableStorage: true,
+        provider: "local_quiz",
+        quiz: {}
+      };
+  if (!workSession.quiz || typeof workSession.quiz !== "object") workSession.quiz = {};
+  const curr = Math.floor(Number(workSession.quiz.correctCount || 0));
+  workSession.quiz.correctCount = (Number.isFinite(curr) && curr >= 0) ? curr : 0;
+  const currentCorrect = workSession.quiz.correctCount;
 
   // 每题仅 1 次作答机会：答错一次就换题
   const correct = (idx === chal.a);
@@ -986,9 +1240,44 @@ async function handleLocalQuizCallback(callbackQuery, env, ctx) {
       }
     } catch (_) {}
 
-    await tgCall(env, "sendMessage", { chat_id: userId, text: "❌ 答案不正确，已为您更换题目。" });
+    await tgCall(env, "sendMessage", {
+      chat_id: userId,
+      text: `❌ 答案不正确，当前进度 ${currentCorrect}/${LOCAL_QUIZ_PASS_COUNT}，已为您更换题目。`
+    });
 
     // 立即下发新题（强制跳过 1 分钟内不重复发题的逻辑）
+    await sendLocalQuizVerification(userId, env, null, false, { forceNewQuestion: true });
+    return;
+  }
+
+  const nextCorrect = currentCorrect + 1;
+  if (nextCorrect < LOCAL_QUIZ_PASS_COUNT) {
+    workSession.quiz.correctCount = nextCorrect;
+    workSession.quiz.verifyId = null;
+    workSession.quiz.issuedAt = 0;
+    workSession.provider = "local_quiz";
+    await kvPut(env, sessionKey, JSON.stringify(workSession), { expirationTtl: CONFIG.VERIFY_EXPIRE_SECONDS });
+    await kvDelete(env, chalKey);
+
+    try {
+      if (callbackQuery.message) {
+        const chatId = callbackQuery.message.chat?.id;
+        const messageId = callbackQuery.message.message_id;
+        if (chatId && messageId) {
+          const p = tgCall(env, "editMessageReplyMarkup", {
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: { inline_keyboard: [] }
+          });
+          if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(p); else await p;
+        }
+      }
+    } catch (_) {}
+
+    await tgCall(env, "sendMessage", {
+      chat_id: userId,
+      text: `✅ 回答正确，当前进度 ${nextCorrect}/${LOCAL_QUIZ_PASS_COUNT}。请继续下一题。`
+    });
     await sendLocalQuizVerification(userId, env, null, false, { forceNewQuestion: true });
     return;
   }
@@ -1018,9 +1307,9 @@ async function handleLocalQuizCallback(callbackQuery, env, ctx) {
   } catch (_) {}
 
   // 补转发暂存消息（KV pending_ids）
-  await processPendingMessagesAfterVerification(userId, sessionData, env);
+  await processPendingMessagesAfterVerification(userId, workSession, env);
 
-  Logger.info("local_quiz_verified_success", { userId });
+  Logger.info("local_quiz_verified_success", { userId, solved: nextCorrect });
 }
 
 
@@ -3106,17 +3395,17 @@ async function buildSettingsPanel(env, adminId, botEnabled, opts = {}) {
 
     const statusText = botEnabled ? "✅ 已开启" : "⛔ 已关闭";
     const verifyMode = await getGlobalVerifyMode(env);
-    const verifyModeText = (verifyMode === "local_quiz") ? "📚 本地题库验证" : "☁️ Cloudflare 验证";
+    const verifyModeText = getVerifyModeText(verifyMode);
     const spamEnabled = await getGlobalSpamFilterEnabled(env);
     const spamText = spamEnabled ? "✅ 已开启" : "⛔ 已关闭";
-    const aiText = hasWorkersAIBinding(env) ? "✅ 可用" : "⛔ 未绑定";
+    const aiText = hasGrokModerationConfig(env) ? "✅ 可用" : "⛔ 未配置";
     const tsReady = hasTurnstileBinding(env);
     const tsText = tsReady ? "✅ 已配置" : "⛔ 未配置";
     let panelText = `⚙️ **设置面板**
 
 机器人总开关：${statusText}
 垃圾消息拦截：${spamText}
-Workers AI：${aiText}
+Grok 审核：${aiText}
 Turnstile：${tsText}
 验证方式：${verifyModeText}
 
@@ -3136,11 +3425,18 @@ ${note}`;
     const rows = [];
 
     if (currentPage === 1) {
-
-        if (tsReady) {
-            const verifyToggleAction = (verifyMode === "local_quiz") ? "v_t" : "v_q";
-            const verifyToggleText = (verifyMode === "local_quiz") ? "☁️ 切换为 Cloudflare 验证" : "📚 切换为本地题库验证";
-            rows.push([{ text: verifyToggleText, callback_data: await makeData(verifyToggleAction) }]);
+        if (verifyMode === "disabled") {
+            rows.push([{ text: "📚 开启本地题库验证", callback_data: await makeData("v_q") }]);
+            if (tsReady) {
+                rows.push([{ text: "☁️ 开启 Cloudflare 验证", callback_data: await makeData("v_t") }]);
+            }
+        } else {
+            rows.push([{ text: "🚫 关闭人机验证", callback_data: await makeData("v_off") }]);
+            if (tsReady) {
+                const verifyToggleAction = (verifyMode === "local_quiz") ? "v_t" : "v_q";
+                const verifyToggleText = (verifyMode === "local_quiz") ? "☁️ 切换为 Cloudflare 验证" : "📚 切换为本地题库验证";
+                rows.push([{ text: verifyToggleText, callback_data: await makeData(verifyToggleAction) }]);
+            }
         }
 
         const spamToggleAction = spamEnabled ? "sf_off" : "sf_on";
@@ -3600,10 +3896,10 @@ async function handleSettingsCallback(callbackQuery, env, ctx) {
         const botEnabled = await isBotEnabled(env);
         const statusText = botEnabled ? "✅ 已开启" : "⛔ 已关闭";
         const verifyMode = await getGlobalVerifyMode(env);
-        const verifyModeText = (verifyMode === "local_quiz") ? "📚 本地题库验证" : "☁️ Cloudflare 验证";
+        const verifyModeText = getVerifyModeText(verifyMode);
         const spamEnabled = await getGlobalSpamFilterEnabled(env);
         const spamText = spamEnabled ? "✅ 已开启" : "⛔ 已关闭";
-        const aiText = hasWorkersAIBinding(env) ? "✅ 可用" : "⛔ 未绑定";
+        const aiText = hasGrokModerationConfig(env) ? "✅ 可用" : "⛔ 未配置";
 
         const tsText = hasTurnstileBinding(env) ? "✅ 已配置" : "⛔ 未配置";
 
@@ -3611,7 +3907,7 @@ async function handleSettingsCallback(callbackQuery, env, ctx) {
 
 机器人总开关：${statusText}
 垃圾消息拦截：${spamText}
-Workers AI：${aiText}
+Grok 审核：${aiText}
 Turnstile：${tsText}
 验证方式：${verifyModeText}
 
@@ -3687,13 +3983,23 @@ if (action === "on" || action === "off") {
 
 
 
-if (action === "v_q" || action === "v_t") {
-        const desired = (action === "v_q") ? "local_quiz" : "turnstile";
+if (action === "v_q" || action === "v_t" || action === "v_off") {
+        const desired = (action === "v_q")
+            ? "local_quiz"
+            : ((action === "v_t") ? "turnstile" : "disabled");
 
         let noteMsg = "";
-        let finalMode = desired;
+        let finalMode = await getGlobalVerifyMode(env);
 
-        if (desired === "turnstile" && !hasTurnstileBinding(env)) {
+        if (desired === "disabled") {
+            const ok = await setGlobalVerifyMode(env, "disabled");
+            if (ok) {
+                finalMode = "disabled";
+                noteMsg = "✅ 已关闭人机验证";
+            } else {
+                noteMsg = "⛔ 关闭人机验证失败，请稍后重试";
+            }
+        } else if (desired === "turnstile" && !hasTurnstileBinding(env)) {
             finalMode = "local_quiz";
             await setGlobalVerifyMode(env, "local_quiz");
             noteMsg = "⛔ 未检测到 Turnstile 配置（CF_TURNSTILE_SITE_KEY / CF_TURNSTILE_SECRET_KEY），已保持为本地题库验证";
@@ -3703,14 +4009,17 @@ if (action === "v_q" || action === "v_t") {
                 finalMode = "local_quiz";
                 await setGlobalVerifyMode(env, "local_quiz");
                 noteMsg = "⛔ 未检测到 Turnstile 配置（CF_TURNSTILE_SITE_KEY / CF_TURNSTILE_SECRET_KEY），已保持为本地题库验证";
+            } else if (!ok) {
+                noteMsg = "⛔ 切换验证方式失败，请稍后重试";
             } else {
-                const modeText = (desired === "local_quiz") ? "📚 本地题库验证" : "☁️ Cloudflare 验证";
+                finalMode = desired;
+                const modeText = getVerifyModeText(desired);
                 noteMsg = `✅ 已切换验证方式为：${modeText}`;
             }
         }
 
         const botEnabled = await isBotEnabled(env);
-        const showModeText = (finalMode === "local_quiz") ? "📚 本地题库验证" : "☁️ Cloudflare 验证";
+        const showModeText = getVerifyModeText(finalMode);
         const panel = await buildSettingsPanel(env, adminId, botEnabled, { note: noteMsg || `✅ 当前验证方式：${showModeText}` });
         try {
             await tgCall(env, "editMessageText", {
@@ -3758,13 +4067,13 @@ if (action === "v_q" || action === "v_t") {
         const currentRules = await getGlobalSpamFilterRules(env);
         const currentPrompt = await getGlobalSpamFilterRulesPrompt(env);
         const enabled = await getGlobalSpamFilterEnabled(env);
-        const aiAvail = hasWorkersAIBinding(env);
+        const aiAvail = hasGrokModerationConfig(env);
 
         const header = [
             "✏️ 编辑垃圾消息规则",
             "",
             `垃圾消息拦截：${enabled ? "✅ 已开启" : "⛔ 已关闭"}`,
-            `Workers AI：${aiAvail ? "✅ 可用" : "⛔ 未绑定（将不会调用 AI 兜底）"}`,
+            `Grok 审核：${aiAvail ? "✅ 可用" : "⛔ 未配置（将无法调用 Grok 审核）"}`,
             "",
             "请【回复】本条消息，发送新的规则。",
             "每次提交会在现有规则基础上【追加】（不会删除旧项）。",
@@ -5687,9 +5996,12 @@ async function handlePrivateMessage(msg, env, ctx, origin = null) {
     const isBanned = await kvGetText(env, `banned:${userId}`, CONFIG.KV_CRITICAL_CACHE_TTL);
     if (isBanned) return;
 
+    const verifyMode = await getGlobalVerifyMode(env);
+    const verificationDisabled = (verifyMode === "disabled");
+
     const trusted = await isTrustedUser(env, userId);
     if (trusted) {
-        // 白名单用户：跳过人机验证与垃圾识别检查
+        // 白名单用户：跳过人机验证
         // best-effort 清理遗留的验证会话状态，避免出现“已验证仍提示验证”的死循环
         try {
             const p1 = kvDelete(env, `pending_verify:${userId}`);
@@ -5711,6 +6023,22 @@ async function handlePrivateMessage(msg, env, ctx, origin = null) {
     }
 
     let verified = await kvGetText(env, `verified:${userId}`, CONFIG.KV_CRITICAL_CACHE_TTL);
+
+    if (verificationDisabled) {
+        if (!verified) {
+            verified = "1";
+            const verifiedTtl = getVerifiedTtlSeconds(env);
+            const pWrite = (verifiedTtl > 0)
+                ? kvPut(env, `verified:${userId}`, "1", { expirationTtl: verifiedTtl })
+                : kvPut(env, `verified:${userId}`, "1");
+            const p1 = kvDelete(env, `pending_verify:${userId}`);
+            const p2 = kvDelete(env, `verify_session:${userId}`);
+            const p3 = kvDelete(env, `verified_grace:${userId}`);
+            const p4 = cacheDelete(`verify_notice_sent:${userId}`);
+            if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(Promise.allSettled([pWrite, p1, p2, p3, p4]));
+            else await Promise.allSettled([pWrite, p1, p2, p3, p4]);
+        }
+    }
 
     if (!verified) {
         const grace = await kvGetText(env, `verified_grace:${userId}`, CONFIG.KV_CRITICAL_CACHE_TTL);
@@ -5781,6 +6109,8 @@ async function forwardToTopic(msg, userId, key, env, ctx, origin = null) {
         return;
     }
 
+    const verifyMode = await getGlobalVerifyMode(env);
+    const verificationDisabled = (verifyMode === "disabled");
     const trusted = await isTrustedUser(env, userId);
     if (trusted) {
         // 白名单用户：跳过 pending_verify 检查（并清理残留状态）
@@ -5792,7 +6122,7 @@ async function forwardToTopic(msg, userId, key, env, ctx, origin = null) {
         } catch (_) {}
     }
 
-    const pendingVerify = trusted ? null : await kvGetText(env, `pending_verify:${userId}`, CONFIG.KV_CRITICAL_CACHE_TTL);
+    const pendingVerify = (trusted || verificationDisabled) ? null : await kvGetText(env, `pending_verify:${userId}`, CONFIG.KV_CRITICAL_CACHE_TTL);
 if (pendingVerify) {
     // v1.2：若已验证（或处于 grace），但 pending_verify 仍残留，则直接清理并继续放行，避免“验证后仍要求验证”的死循环
     let verified = await kvGetText(env, `verified:${userId}`, CONFIG.KV_CRITICAL_CACHE_TTL);
@@ -5895,15 +6225,13 @@ if (shouldSendNotice) {
 }
 
     // 已验证用户：若命中垃圾规则或 AI 判定为垃圾，则丢弃消息并提示用户（不转发）
-    if (!trusted) {
-        try {
-            const verdict = await classifySpamOptional(env, msg);
-            if (verdict && verdict.is_spam) {
-                await notifyUserSpamDropped(env, userId);
-                return;
-            }
-        } catch (_) {}
-    }
+    try {
+        const verdict = await classifySpamOptional(env, msg);
+        if (verdict && verdict.is_spam) {
+            await notifyUserSpamDropped(env, userId);
+            return;
+        }
+    } catch (_) {}
 
 
     let rec = await kvGetJSON(env, key, null);
@@ -6631,17 +6959,16 @@ let rawPrompt = (msg.text || "").replace(/\u200b/g, "").trim();
 
     if (command === "help") {
         const helpText = `⚙️ 版本: ${BOT_VERSION}\n` +
-		                 `📖 **使用说明**\n` +                 
+                         `📖 **使用说明**\n` +
                          `💡 所有指令均不会被转发到用户私聊\n\n` +
                          `/help 显示使用说明\n` +
-                         `/trust 将当前用户加入白名单，加入白名单的用户可以绕过垃圾消息识别，并且永不再需要进行人机验证，若对黑名单用户使用将自动移除黑名单\n` +
+                         `/trust 将当前用户加入白名单，加入白名单的用户将永不再需要进行人机验证，若对黑名单用户使用将自动移除黑名单\n` +
                          `/ban 封禁用户，可加用户ID，例如/ban 或/ban 123456，若对白名单用户使用将自动移除白名单\n` +
                          `/unban 解封用户，可加用户ID，例如/unban 或/unban 123456\n` +
                          `/blacklist 查看黑名单\n` +
                          `/info 查看当前用户信息\n` +
                          `/settings 打开设置面板\n` +
                          `/clean ⚠️ 危险操作：删除当前话题用户的所有数据，将会删除该用户话题，清空该用户的聊天记录，并重置他的人机验证，但不会改变该用户的封禁状态或白名单状态`;
-
 
         await tgCall(env, "sendMessage", withMessageThreadId({
             chat_id: env.SUPERGROUP_ID,
@@ -6771,7 +7098,7 @@ if (command === "settings") {
 用户: ${userInfo.name}
 用户ID: ${userId}${unbanNote}
 
-该用户后续发送的任何消息都将绕过垃圾消息识别，并且永不再需要人机验证。`
+该用户后续发送的任何消息都将永不再需要人机验证。`
         }, threadId));
 
         Logger.info('trust_user_added', { adminId, userId, threadId });
