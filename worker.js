@@ -1474,30 +1474,20 @@ function buildSpamJudgeLogMetaText(msg, finalVerdict, detail = {}) {
 async function archiveSpamJudgeLog(env, msg, finalVerdict, detail = {}) {
   try {
     const sendToThread = async (threadId) => {
-      const metaRes = await tgCall(env, "sendMessage", withMessageThreadId({
+      return await tgCall(env, "sendMessage", withMessageThreadId({
         chat_id: env.SUPERGROUP_ID,
         message_thread_id: threadId,
         text: buildSpamJudgeLogMetaText(msg, finalVerdict, detail),
         disable_notification: true
       }, threadId));
-
-      const copyRes = await tgCall(env, "copyMessage", withMessageThreadId({
-        chat_id: env.SUPERGROUP_ID,
-        message_thread_id: threadId,
-        from_chat_id: msg.chat.id,
-        message_id: msg.message_id,
-        disable_notification: true
-      }, threadId));
-      return { metaRes, copyRes };
     };
 
     let rec = await ensureLogTopicRec(env);
-    let { metaRes, copyRes } = await sendToThread(rec.thread_id);
+    let metaRes = await sendToThread(rec.thread_id);
 
-    if ((!metaRes?.ok && isTopicMissingOrDeleted(metaRes?.description)) ||
-        (!copyRes?.ok && isTopicMissingOrDeleted(copyRes?.description))) {
+    if (!metaRes?.ok && isTopicMissingOrDeleted(metaRes?.description)) {
       rec = await ensureLogTopicRec(env, { forceRecreate: true });
-      ({ metaRes, copyRes } = await sendToThread(rec.thread_id));
+      metaRes = await sendToThread(rec.thread_id);
     }
 
     Logger.info("spam_judgement_logged", {
