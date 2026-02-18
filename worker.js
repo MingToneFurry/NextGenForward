@@ -650,33 +650,113 @@ function extractTextFromTelegramMessage(msg) {
   return text.trim();
 }
 
-function isCrossChannelReplyMessage(msg) {
-  if (!msg || typeof msg !== "object") return false;
+function normalizeChatId(value) {
+  if (value === null || value === undefined) return null;
+  const n = Number(value);
+  if (Number.isFinite(n)) return n;
+  const s = String(value).trim();
+  return s || null;
+}
 
-  if (msg.sender_chat && msg.sender_chat.type === "channel" && msg.is_automatic_forward) return true;
-  if (msg.forward_origin && typeof msg.forward_origin.type === "string" && /channel/i.test(msg.forward_origin.type)) return true;
+function detectCrossChannelReply(msg) {
+  const result = {
+    isCrossChannel: false,
+    replyType: "none",
+    channelInfo: {
+      id: null,
+      title: null,
+      username: null
+    }
+  };
 
-  const reply = msg.reply_to_message;
-  if (reply) {
-    if (reply.chat && reply.chat.type === "channel") return true;
-    if (reply.sender_chat && reply.sender_chat.type === "channel") return true;
-    if (reply.is_automatic_forward && reply.sender_chat && reply.sender_chat.type === "channel") return true;
-    if (reply.forward_origin && typeof reply.forward_origin.type === "string" && /channel/i.test(reply.forward_origin.type)) return true;
-  }
+  if (!msg || typeof msg !== "object") return result;
+  const chatType = String(msg?.chat?.type || "");
+  if (chatType !== "group" && chatType !== "supergroup") return result;
 
+  const markChannel = (chatLike, replyType) => {
+    if (!chatLike || chatLike.type !== "channel") return false;
+    const channelId = normalizeChatId(chatLike.id);
+    result.isCrossChannel = true;
+    result.replyType = replyType;
+    result.channelInfo = {
+      id: channelId,
+      title: chatLike.title || "Unknown Channel",
+      username: chatLike.username || null
+    };
+    return true;
+  };
+
+  // Case 1: Telegram external reply object
   const externalReply = msg.external_reply;
   if (externalReply) {
-    if (externalReply.chat && externalReply.chat.type === "channel") return true;
-    if (externalReply.sender_chat && externalReply.sender_chat.type === "channel") return true;
+    if (markChannel(externalReply.chat, "external_reply")) return result;
+    if (markChannel(externalReply.sender_chat, "external_reply_sender")) return result;
+
     const origin = externalReply.origin;
     if (origin) {
-      if (origin.chat && origin.chat.type === "channel") return true;
-      if (origin.sender_chat && origin.sender_chat.type === "channel") return true;
-      if (typeof origin.type === "string" && /channel/i.test(origin.type)) return true;
+      if (markChannel(origin.chat, "external_reply_origin_chat")) return result;
+      if (markChannel(origin.sender_chat, "external_reply_origin_sender")) return result;
+      if (typeof origin.type === "string" && /channel/i.test(origin.type)) {
+        result.isCrossChannel = true;
+        result.replyType = "external_reply_origin_channel";
+        result.channelInfo = {
+          id: null,
+          title: "Unknown Channel",
+          username: null
+        };
+        return result;
+      }
     }
   }
 
-  return false;
+  // Case 2: Reply chain
+  const reply = msg.reply_to_message;
+  if (!reply) return result;
+
+  if (markChannel(reply.forward_from_chat, "forward_from_channel")) return result;
+  if (markChannel(reply.chat, "reply_chat_channel")) return result;
+  if (markChannel(reply.sender_chat, "sender_chat_channel")) return result;
+
+  const forwardOrigin = reply.forward_origin;
+  if (forwardOrigin) {
+    if (markChannel(forwardOrigin.chat, "reply_forward_origin_chat")) return result;
+    if (markChannel(forwardOrigin.sender_chat, "reply_forward_origin_sender")) return result;
+    if (typeof forwardOrigin.type === "string" && /channel/i.test(forwardOrigin.type)) {
+      result.isCrossChannel = true;
+      result.replyType = "reply_forward_origin_channel";
+      result.channelInfo = {
+        id: null,
+        title: "Unknown Channel",
+        username: null
+      };
+      return result;
+    }
+  }
+
+  // Hidden/obfuscated forward origins are treated as cross-channel.
+  if (reply.forward_sender_name || (reply.forward_date && !reply.forward_from && !reply.forward_from_chat)) {
+    result.isCrossChannel = true;
+    result.replyType = "hidden_forward";
+    result.channelInfo = {
+      id: null,
+      title: reply.forward_sender_name || "Hidden Source",
+      username: null
+    };
+    return result;
+  }
+
+  if (reply.forward_signature) {
+    result.isCrossChannel = true;
+    result.replyType = "channel_signature";
+    result.channelInfo = {
+      id: null,
+      title: `Channel (${reply.forward_signature})`,
+      username: null
+    };
+    return result;
+  }
+
+  return result;
 }
 
 function highRiskSpamVerdict(text) {
@@ -871,7 +951,7 @@ async function buildModerationImageDataUrl(env, msg) {
   }
 }
 
-async function aiSpamVerdict(env, msg, text, rules) {
+async function aiSpamVerdict(env, msg, text, rules, crossChannelInfo = null) {
   const grokCfg = getGrokModerationConfig(env);
   if (!grokCfg.ready) return null;
 
@@ -942,7 +1022,8 @@ confidence 映射（严格遵守，谐音计入信号强度）：
 
   const urlCount = countUrls(rawText);
   const handleCount = (rawText.match(/@\w{4,}(?:_bot)?\b/gi) || []).length;
-  const crossChannelHint = isCrossChannelReplyMessage(msg);
+  const resolvedCrossChannelInfo = crossChannelInfo || detectCrossChannelReply(msg);
+  const crossChannelHint = !!resolvedCrossChannelInfo.isCrossChannel;
   const userPayload = {
     text: t.slice(0, 2000),
     rules_hint: rules || {},
@@ -950,6 +1031,8 @@ confidence 映射（严格遵守，谐音计入信号强度）：
       url_count: urlCount,
       handle_count: handleCount,
       cross_channel_reply: crossChannelHint,
+      cross_channel_detected: !!resolvedCrossChannelInfo.isCrossChannel,
+      cross_channel_reply_type: resolvedCrossChannelInfo.replyType || "none",
       has_external_reply: !!(msg && msg.external_reply),
       has_forward_origin: !!(msg && msg.forward_origin),
       sender_chat_is_channel: !!(msg && msg.sender_chat && msg.sender_chat.type === "channel")
@@ -1236,13 +1319,15 @@ confidence 映射（严格遵守，谐音计入信号强度）：
 async function classifySpamOptional(env, msg) {
   const text = extractTextFromTelegramMessage(msg);
   const enabled = await getGlobalSpamFilterEnabled(env);
-  const crossChannel = isCrossChannelReplyMessage(msg);
+  const crossChannelInfo = detectCrossChannelReply(msg);
+  const crossChannel = !!crossChannelInfo.isCrossChannel;
 
   const finish = async (finalVerdict, detail = {}) => {
     await archiveSpamJudgeLog(env, msg, finalVerdict, {
       text,
       spamEnabled: enabled,
       crossChannel,
+      crossChannelInfo,
       ...detail
     });
     return finalVerdict;
@@ -1258,7 +1343,7 @@ async function classifySpamOptional(env, msg) {
   if (crossChannel) {
     return await finish(
       { is_spam: true, score: 1.0, reason: "rule:cross_channel_reply", ai_used: false },
-      { source: "cross_channel_reply" }
+      { source: "cross_channel_reply", crossChannelInfo }
     );
   }
 
@@ -1266,7 +1351,7 @@ async function classifySpamOptional(env, msg) {
   const ruleVerdict = ruleBasedSpamVerdict(text, rules);
 
   // 无论本地规则结果如何，都调用一次 Grok 垃圾识别（满足“每条请求都做一次 AI 判断”）
-  const ai = await aiSpamVerdict(env, msg, text, rules);
+  const ai = await aiSpamVerdict(env, msg, text, rules, crossChannelInfo);
 
   // 放行规则优先：仍会执行一次 Grok 判断，但最终放行
   if (typeof ruleVerdict.reason === "string" && ruleVerdict.reason.startsWith("allow_")) {
