@@ -1,12 +1,10 @@
 # Next Gen Forward (Modified)
-<img width="535" height="185" alt="项目主图" src="https://github.com/user-attachments/assets/a632a655-0b6e-4f31-b6ea-1364028bf540" />
 
 一个基于 Cloudflare Workers 的 Telegram 双向私聊机器人方案，支持快速部署与稳定运行。
 
 本仓库基于 [mole404/NextGenForward](https://github.com/mole404/NextGenForward) 进行了小小修改。
 
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
-
+示例机器人(可以和我聊天呀)： https://t.me/MingTonePmBot
 ---
 
 ## 项目亮点
