@@ -1,13 +1,3 @@
-// Next Gen Forward v1.6.2
-// 基于 Cloudflare Workers 部署的 Telegram 双向私聊机器人。
-// 通过群组话题管理私聊，人机验证模块支持 Cloudflare Turnstile & 本地题库 可随时切换。
-// 项目地址 https://github.com/mole404/NextGenForward
-// 本项目基于 https://github.com/jikssha/telegram_private_chatbot 修改
-// 在此对原项目作者 Vaghr (Github@jikssha) ，以及我的好兄弟 打钱 & 逆天 表示特别感谢！
-
-// Copyright (c) 2026 Frost
-// Released under the MIT License. See LICENSE in the project root.
-
 const BOT_VERSION = "v1.6.2";
 
 // --- 配置常量 ---
@@ -139,6 +129,8 @@ const RUBBISH_TOPIC_REC_KEY = "global_rubbish_topic:rec";
 // KV key 前缀：垃圾箱话题内“消息ID -> 用户ID”路由
 const RUBBISH_ROUTE_KEY_PREFIX = "rubbish_route:";
 const RUBBISH_ROUTE_TTL_SECONDS = 30 * 24 * 60 * 60;
+// KV key：日志话题记录（保存每次垃圾判断详情）
+const LOG_TOPIC_REC_KEY = "global_log_topic:rec";
 
 
 
@@ -391,16 +383,10 @@ async function setGlobalVerifyMode(env, mode) {
 // 默认垃圾规则（可在 /settings 中编辑）
 const DEFAULT_SPAM_RULES = {
   version: 1,
-  max_links: 2,                 // 文本中链接数 >= max_links 判定为 spam；0 表示不启用
-  keywords: [
-    "加群", "进群", "推广", "广告", "返利", "博彩", "代投", "套利",
-    "USDT", "BTC", "ETH", "币圈", "空投", "交易所", "稳赚", "客服", "开户链接"
-  ],
-  regexes: [
-    "\\b(?:usdt|btc|eth|trx|bnb)\\b",
-    "(?:t\\.me\\/\\w+|telegram\\.me\\/\\w+)",
-    "(?:免费|稳赚|日赚|高回报|带单|私聊我)"
-  ],
+  // 默认拦截规则清空：仅依赖高风险硬规则 + AI 判定（管理员可在 /settings 中再配置）
+  max_links: 0,
+  keywords: [],
+  regexes: [],
   allow_keywords: [],
   allow_regexes: [],
   ai: {
@@ -1247,17 +1233,35 @@ async function aiSpamVerdict(env, msg, text, rules) {
 }
 
 async function classifySpamOptional(env, msg) {
+  const text = extractTextFromTelegramMessage(msg);
   const enabled = await getGlobalSpamFilterEnabled(env);
+  const crossChannel = isCrossChannelReplyMessage(msg);
+
+  const finish = async (finalVerdict, detail = {}) => {
+    await archiveSpamJudgeLog(env, msg, finalVerdict, {
+      text,
+      spamEnabled: enabled,
+      crossChannel,
+      ...detail
+    });
+    return finalVerdict;
+  };
+
   if (!enabled) {
-    return { is_spam: false, score: 0.0, reason: "spam_filter_disabled", ai_used: false };
+    return await finish(
+      { is_spam: false, score: 0.0, reason: "spam_filter_disabled", ai_used: false },
+      { source: "filter_disabled" }
+    );
   }
 
-  if (isCrossChannelReplyMessage(msg)) {
-    return { is_spam: true, score: 1.0, reason: "rule:cross_channel_reply", ai_used: false };
+  if (crossChannel) {
+    return await finish(
+      { is_spam: true, score: 1.0, reason: "rule:cross_channel_reply", ai_used: false },
+      { source: "cross_channel_reply" }
+    );
   }
 
   const rules = await getGlobalSpamFilterRules(env);
-  const text = extractTextFromTelegramMessage(msg);
   const ruleVerdict = ruleBasedSpamVerdict(text, rules);
 
   // 无论本地规则结果如何，都调用一次 Grok 垃圾识别（满足“每条请求都做一次 AI 判断”）
@@ -1265,21 +1269,33 @@ async function classifySpamOptional(env, msg) {
 
   // 放行规则优先：仍会执行一次 Grok 判断，但最终放行
   if (typeof ruleVerdict.reason === "string" && ruleVerdict.reason.startsWith("allow_")) {
-    return { ...ruleVerdict, ai_used: !!ai };
+    return await finish(
+      { ...ruleVerdict, ai_used: !!ai },
+      { source: "allow_rule", ruleVerdict, aiVerdict: ai }
+    );
   }
 
   if (ruleVerdict.is_spam) {
-    return { ...ruleVerdict, ai_used: !!ai };
+    return await finish(
+      { ...ruleVerdict, ai_used: !!ai },
+      { source: "rule_match", ruleVerdict, aiVerdict: ai }
+    );
   }
 
   if (ai) {
     // v1.6.0: 阈值统一为 0.65（sanitizeSpamRules 已固定），这里继续沿用 rules.ai.threshold 以保持一致
     const isSpam = ai.is_spam && ai.score >= (rules && rules.ai ? rules.ai.threshold : DEFAULT_SPAM_RULES.ai.threshold);
-    return { is_spam: !!isSpam, score: ai.score, reason: ai.reason, ai_used: true };
+    return await finish(
+      { is_spam: !!isSpam, score: ai.score, reason: ai.reason, ai_used: true },
+      { source: "ai_only", ruleVerdict, aiVerdict: ai }
+    );
   }
 
   // Grok 无有效返回时默认放行，避免因额度/网络问题误伤正常用户
-  return { is_spam: false, score: 0.0, reason: "rule:no_match", ai_used: false };
+  return await finish(
+    { is_spam: false, score: 0.0, reason: "rule:no_match", ai_used: false },
+    { source: "no_match", ruleVerdict, aiVerdict: null }
+  );
 }
 
 async function notifyUserSpamDropped(env, userId) {
@@ -1350,6 +1366,153 @@ async function ensureRubbishTopicRec(env, opts = {}) {
   };
   await kvPut(env, RUBBISH_TOPIC_REC_KEY, JSON.stringify(rec));
   return rec;
+}
+
+async function getLogTopicThreadId(env) {
+  const rec = await kvGetJSON(env, LOG_TOPIC_REC_KEY, null, {});
+  if (!rec || !rec.thread_id) return null;
+  const tid = Number(rec.thread_id);
+  return Number.isFinite(tid) && tid > 0 ? tid : null;
+}
+
+async function ensureLogTopicRec(env, opts = {}) {
+  const forceRecreate = !!(opts && opts.forceRecreate);
+
+  if (!forceRecreate) {
+    const rec = await kvGetJSON(env, LOG_TOPIC_REC_KEY, null, {});
+    if (rec && rec.thread_id) {
+      const tid = Number(rec.thread_id);
+      if (Number.isFinite(tid) && tid > 0) return { ...rec, thread_id: tid };
+    }
+  }
+
+  const topicTitle = readEnvString(env, "LOG_TOPIC_TITLE", "log").slice(0, CONFIG.MAX_TITLE_LENGTH) || "log";
+  const createRes = await tgCall(env, "createForumTopic", {
+    chat_id: env.SUPERGROUP_ID,
+    name: topicTitle
+  });
+  if (!createRes || !createRes.ok || !createRes.result?.message_thread_id) {
+    throw new Error(`create_log_topic_failed:${createRes?.description || "unknown"}`);
+  }
+
+  const rec = {
+    thread_id: Number(createRes.result.message_thread_id),
+    title: topicTitle,
+    created_at: Date.now()
+  };
+  await kvPut(env, LOG_TOPIC_REC_KEY, JSON.stringify(rec));
+  return rec;
+}
+
+function buildLogTextPreview(text, maxLen = 600) {
+  const t = String(text || "").replace(/\s+/g, " ").trim();
+  if (!t) return "[NO_TEXT_CONTENT]";
+  if (t.length <= maxLen) return t;
+  return `${t.slice(0, maxLen)}...[truncated]`;
+}
+
+function buildSpamJudgeLogMetaText(msg, finalVerdict, detail = {}) {
+  const from = msg?.from || {};
+  const userId = Number(from.id || 0);
+  const fn = String(from.first_name || "").trim();
+  const ln = String(from.last_name || "").trim();
+  const uname = String(from.username || "").trim();
+  const display = (fn || ln) ? `${fn} ${ln}`.trim() : (uname ? `@${uname}` : `User${userId || "unknown"}`);
+
+  const finalScore = Number(finalVerdict?.score);
+  const finalReason = String(finalVerdict?.reason || "unknown");
+  const finalIsSpam = !!finalVerdict?.is_spam;
+  const aiUsed = !!finalVerdict?.ai_used;
+
+  const ruleVerdict = detail.ruleVerdict || null;
+  const ruleReason = String(ruleVerdict?.reason || "none");
+  const ruleScore = Number(ruleVerdict?.score);
+  const ruleScoreText = Number.isFinite(ruleScore) ? ruleScore.toFixed(2) : "0.00";
+  const ruleIsSpam = !!ruleVerdict?.is_spam;
+
+  const aiVerdict = detail.aiVerdict || null;
+  const aiReason = String(aiVerdict?.reason || "none");
+  const aiScore = Number(aiVerdict?.score);
+  const aiScoreText = Number.isFinite(aiScore) ? aiScore.toFixed(2) : "0.00";
+  const aiIsSpam = !!aiVerdict?.is_spam;
+  const aiSignals = Array.isArray(aiVerdict?.signals)
+    ? aiVerdict.signals.filter(x => typeof x === "string").slice(0, 12).join(" | ")
+    : "";
+
+  const textPreview = buildLogTextPreview(detail.text || extractTextFromTelegramMessage(msg));
+  const mediaFlags = [
+    msg?.photo ? "photo" : null,
+    msg?.video ? "video" : null,
+    msg?.document ? "document" : null,
+    msg?.audio ? "audio" : null
+  ].filter(Boolean);
+
+  const finalScoreText = Number.isFinite(finalScore) ? finalScore.toFixed(2) : "0.00";
+  const source = String(detail.source || "unknown");
+  const spamEnabled = detail.spamEnabled === true ? "true" : (detail.spamEnabled === false ? "false" : "unknown");
+  const crossChannel = detail.crossChannel === true ? "true" : "false";
+
+  const lines = [
+    "[log] spam_judgement",
+    `user: ${display}`,
+    `user_id: ${userId || "unknown"}`,
+    `chat_id: ${msg?.chat?.id ?? "unknown"}`,
+    `message_id: ${msg?.message_id ?? "unknown"}`,
+    `source: ${source}`,
+    `spam_filter_enabled: ${spamEnabled}`,
+    `cross_channel_reply: ${crossChannel}`,
+    `final: spam=${finalIsSpam} score=${finalScoreText} reason=${finalReason} ai_used=${aiUsed}`,
+    `rule: spam=${ruleIsSpam} score=${ruleScoreText} reason=${ruleReason}`,
+    `ai: spam=${aiIsSpam} score=${aiScoreText} reason=${aiReason}`,
+    `media: ${mediaFlags.length ? mediaFlags.join(",") : "none"}`,
+    `text: ${textPreview}`
+  ];
+  if (aiSignals) lines.push(`ai_signals: ${aiSignals}`);
+  return lines.join("\n");
+}
+
+async function archiveSpamJudgeLog(env, msg, finalVerdict, detail = {}) {
+  try {
+    const sendToThread = async (threadId) => {
+      const metaRes = await tgCall(env, "sendMessage", withMessageThreadId({
+        chat_id: env.SUPERGROUP_ID,
+        message_thread_id: threadId,
+        text: buildSpamJudgeLogMetaText(msg, finalVerdict, detail),
+        disable_notification: true
+      }, threadId));
+
+      const copyRes = await tgCall(env, "copyMessage", withMessageThreadId({
+        chat_id: env.SUPERGROUP_ID,
+        message_thread_id: threadId,
+        from_chat_id: msg.chat.id,
+        message_id: msg.message_id,
+        disable_notification: true
+      }, threadId));
+      return { metaRes, copyRes };
+    };
+
+    let rec = await ensureLogTopicRec(env);
+    let { metaRes, copyRes } = await sendToThread(rec.thread_id);
+
+    if ((!metaRes?.ok && isTopicMissingOrDeleted(metaRes?.description)) ||
+        (!copyRes?.ok && isTopicMissingOrDeleted(copyRes?.description))) {
+      rec = await ensureLogTopicRec(env, { forceRecreate: true });
+      ({ metaRes, copyRes } = await sendToThread(rec.thread_id));
+    }
+
+    Logger.info("spam_judgement_logged", {
+      threadId: rec.thread_id,
+      userId: msg?.from?.id,
+      is_spam: !!finalVerdict?.is_spam,
+      reason: finalVerdict?.reason || "unknown",
+      score: finalVerdict?.score
+    });
+  } catch (e) {
+    Logger.warn("spam_judgement_log_failed", {
+      userId: msg?.from?.id,
+      error: String((e && e.message) ? e.message : e)
+    });
+  }
 }
 
 function buildRubbishMetaText(msg, userId, verdict) {
@@ -2720,6 +2883,7 @@ async function resolveUserIdByThreadId(env, threadId, limit = CONFIG.KV_OPERATIO
 const GROUP_COMMANDS = [
     { command: "help", description: "显示使用说明" },
     { command: "rubbish", description: "查看/重建垃圾箱话题" },
+    { command: "log", description: "查看/重建日志话题" },
     { command: "trust", description: "将当前用户加入白名单" },
     { command: "ban", description: "封禁用户（可加用户ID）" },
     { command: "unban", description: "解封用户（可加用户ID）" },
@@ -7495,6 +7659,7 @@ let rawPrompt = (msg.text || "").replace(/\u200b/g, "").trim();
                          `/info 查看当前用户信息\n` +
                          `/settings 打开设置面板\n` +
                          `/rubbish 查看垃圾箱话题状态，或 /rubbish recreate 重建\n` +
+                         `/log 查看日志话题状态，或 /log recreate 重建\n` +
                          `/clean ⚠️ 危险操作：删除当前话题用户的所有数据，将会删除该用户话题，清空该用户的聊天记录，并重置他的人机验证，但不会改变该用户的封禁状态或白名单状态`;
 
         await tgCall(env, "sendMessage", withMessageThreadId({
@@ -7614,6 +7779,82 @@ if (command === "rubbish") {
 状态：${statusText}
 
 如需重建：\`/rubbish recreate\``,
+            parse_mode: "Markdown",
+            disable_notification: true
+        }, null));
+        return;
+    }
+
+if (command === "log") {
+        const adminId = msg.from?.id;
+        if (!adminId || !(await isAdminUser(env, adminId))) {
+            await tgCall(env, "sendMessage", withMessageThreadId({
+                chat_id: env.SUPERGROUP_ID,
+                message_thread_id: threadId,
+                text: ERROR_MESSAGES.admin_only
+            }, threadId));
+            return;
+        }
+
+        if (threadId && threadId !== 1) {
+            await tgCall(env, "sendMessage", withMessageThreadId({
+                chat_id: env.SUPERGROUP_ID,
+                message_thread_id: threadId,
+                text: "Command error\n\n`/log` can only be used in General topic.",
+                parse_mode: "Markdown"
+            }, threadId));
+            return;
+        }
+
+        const action = String(args || "").trim().toLowerCase();
+        const shouldRecreate = /^(recreate|reset|new|重建|重置)$/.test(action);
+
+        if (shouldRecreate) {
+            const oldThreadId = await getLogTopicThreadId(env);
+            const rec = await ensureLogTopicRec(env, { forceRecreate: true });
+            const oldText = oldThreadId ? String(oldThreadId) : "none";
+            await tgCall(env, "sendMessage", withMessageThreadId({
+                chat_id: env.SUPERGROUP_ID,
+                text:
+`Log topic recreated
+
+old thread id: ${oldText}
+new thread id: ${rec.thread_id}
+title: ${rec.title}
+
+All judgement logs will be sent silently to this topic.`,
+                disable_notification: true
+            }, null));
+            return;
+        }
+
+        const rec = await kvGetJSON(env, LOG_TOPIC_REC_KEY, null, {});
+        const threadIdNum = Number(rec?.thread_id || 0);
+        if (!Number.isFinite(threadIdNum) || threadIdNum <= 0) {
+            await tgCall(env, "sendMessage", withMessageThreadId({
+                chat_id: env.SUPERGROUP_ID,
+                text:
+`Log topic is not initialized yet.
+
+Send \`/log recreate\` to create it now.`,
+                parse_mode: "Markdown",
+                disable_notification: true
+            }, null));
+            return;
+        }
+
+        const probe = await probeForumThread(env, threadIdNum, { reason: "log_status", doubleCheckOnMissingThreadId: false });
+        const statusText = (probe?.status === "ok") ? "ok" : `abnormal (${probe?.status || "unknown"})`;
+        await tgCall(env, "sendMessage", withMessageThreadId({
+            chat_id: env.SUPERGROUP_ID,
+            text:
+`Log topic status
+
+thread id: ${threadIdNum}
+title: ${rec?.title || "log"}
+status: ${statusText}
+
+Recreate if needed: \`/log recreate\``,
             parse_mode: "Markdown",
             disable_notification: true
         }, null));

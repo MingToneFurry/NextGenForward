@@ -143,6 +143,7 @@ powershell -ExecutionPolicy Bypass -File scripts/deploy-with-env.ps1 -Deploy
 | `ADMIN_IDS` | `123456789,987654321` | 指定可执行管理操作的管理员白名单（逗号分隔） |
 | `VERIFIED_TTL_SECONDS` | `86400` | 验证通过状态 TTL；不填或 `<=0` 表示不过期 |
 | `RUBBISH_TOPIC_TITLE` | `rubbish` | 垃圾箱话题名称（用于命中垃圾后的集中存档） |
+| `LOG_TOPIC_TITLE` | `log` | 判断日志话题名称（用于保存每条消息的垃圾判断详情） |
 
 Turnstile 相关可选变量：
 
