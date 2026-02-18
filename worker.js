@@ -650,6 +650,43 @@ function extractTextFromTelegramMessage(msg) {
   return text.trim();
 }
 
+function extractReplyContextText(msg) {
+  if (!msg || typeof msg !== "object") return "";
+
+  const candidates = [];
+  const pushText = (value) => {
+    const s = String(value || "").trim();
+    if (s) candidates.push(s);
+  };
+
+  const reply = msg.reply_to_message;
+  if (reply && typeof reply === "object") {
+    pushText(reply.text);
+    pushText(reply.caption);
+  }
+
+  const externalReply = msg.external_reply;
+  if (externalReply && typeof externalReply === "object") {
+    pushText(externalReply.text);
+    pushText(externalReply.caption);
+
+    const origin = externalReply.origin;
+    if (origin && typeof origin === "object") {
+      pushText(origin.text);
+      pushText(origin.caption);
+    }
+
+    const extMessage = externalReply.message;
+    if (extMessage && typeof extMessage === "object") {
+      pushText(extMessage.text);
+      pushText(extMessage.caption);
+    }
+  }
+
+  if (!candidates.length) return "";
+  return candidates.join("\n").slice(0, 2000);
+}
+
 function normalizeChatId(value) {
   if (value === null || value === undefined) return null;
   const n = Number(value);
@@ -670,9 +707,6 @@ function detectCrossChannelReply(msg) {
   };
 
   if (!msg || typeof msg !== "object") return result;
-  const chatType = String(msg?.chat?.type || "");
-  if (chatType !== "group" && chatType !== "supergroup") return result;
-
   const markChannel = (chatLike, replyType) => {
     if (!chatLike || chatLike.type !== "channel") return false;
     const channelId = normalizeChatId(chatLike.id);
@@ -951,7 +985,7 @@ async function buildModerationImageDataUrl(env, msg) {
   }
 }
 
-async function aiSpamVerdict(env, msg, text, rules, crossChannelInfo = null) {
+async function aiSpamVerdict(env, msg, text, rules, crossChannelInfo = null, replyContextText = "") {
   const grokCfg = getGrokModerationConfig(env);
   if (!grokCfg.ready) return null;
 
@@ -1024,8 +1058,10 @@ confidence 映射（严格遵守，谐音计入信号强度）：
   const handleCount = (rawText.match(/@\w{4,}(?:_bot)?\b/gi) || []).length;
   const resolvedCrossChannelInfo = crossChannelInfo || detectCrossChannelReply(msg);
   const crossChannelHint = !!resolvedCrossChannelInfo.isCrossChannel;
+  const replyContext = String(replyContextText || "").trim();
   const userPayload = {
     text: t.slice(0, 2000),
+    reply_context_text: replyContext.slice(0, 2000),
     rules_hint: rules || {},
     meta_hint: {
       url_count: urlCount,
@@ -1318,6 +1354,8 @@ confidence 映射（严格遵守，谐音计入信号强度）：
 
 async function classifySpamOptional(env, msg) {
   const text = extractTextFromTelegramMessage(msg);
+  const replyContextText = extractReplyContextText(msg);
+  const mergedText = [text, replyContextText].filter(Boolean).join("\n");
   const enabled = await getGlobalSpamFilterEnabled(env);
   const crossChannelInfo = detectCrossChannelReply(msg);
   const crossChannel = !!crossChannelInfo.isCrossChannel;
@@ -1325,6 +1363,7 @@ async function classifySpamOptional(env, msg) {
   const finish = async (finalVerdict, detail = {}) => {
     await archiveSpamJudgeLog(env, msg, finalVerdict, {
       text,
+      replyContextText,
       spamEnabled: enabled,
       crossChannel,
       crossChannelInfo,
@@ -1348,10 +1387,10 @@ async function classifySpamOptional(env, msg) {
   }
 
   const rules = await getGlobalSpamFilterRules(env);
-  const ruleVerdict = ruleBasedSpamVerdict(text, rules);
+  const ruleVerdict = ruleBasedSpamVerdict(mergedText, rules);
 
   // 无论本地规则结果如何，都调用一次 Grok 垃圾识别（满足“每条请求都做一次 AI 判断”）
-  const ai = await aiSpamVerdict(env, msg, text, rules, crossChannelInfo);
+  const ai = await aiSpamVerdict(env, msg, text, rules, crossChannelInfo, replyContextText);
 
   // 放行规则优先：仍会执行一次 Grok 判断，但最终放行
   if (typeof ruleVerdict.reason === "string" && ruleVerdict.reason.startsWith("allow_")) {
