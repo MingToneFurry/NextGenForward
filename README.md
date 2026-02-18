@@ -89,6 +89,25 @@ kv_namespaces = [
 ]
 ```
 
+### 方式 D：使用 `.env` 一键同步并部署（推荐）
+
+仓库已提供脚本：`scripts/deploy-with-env.ps1`，会自动读取 `.env` 并执行：
+
+1. `wrangler secret bulk` 同步变量（避免每次手动填写）
+2. 可选 `wrangler deploy`
+
+仅同步环境变量：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/deploy-with-env.ps1
+```
+
+同步并部署：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/deploy-with-env.ps1 -Deploy
+```
+
 ---
 
 ## 详细配置步骤
@@ -123,6 +142,7 @@ kv_namespaces = [
 | `API_BASE` | `https://api.telegram.org` | Telegram API 地址，默认可不填 |
 | `ADMIN_IDS` | `123456789,987654321` | 指定可执行管理操作的管理员白名单（逗号分隔） |
 | `VERIFIED_TTL_SECONDS` | `86400` | 验证通过状态 TTL；不填或 `<=0` 表示不过期 |
+| `RUBBISH_TOPIC_TITLE` | `rubbish` | 垃圾箱话题名称（用于命中垃圾后的集中存档） |
 
 Turnstile 相关可选变量：
 
@@ -259,3 +279,39 @@ https://api.telegram.org/bot<BOT_TOKEN>/deleteWebhook?drop_pending_updates=true
 感谢 Codex 的大力支持。
 
 如果这个项目对你有帮助，欢迎 Star。
+
+---
+
+## Workers Git 集成自动配置（一次配置，持续生效）
+
+本仓库已将可公开配置写入 `wrangler.toml`（`[vars]` + `TOPIC_MAP` 绑定声明）。
+启用 Cloudflare Workers 的 Git 集成后，后续每次 push 自动部署时会直接复用这些配置，不需要重复填写。
+
+### 会自动带上的配置（来自仓库）
+- `wrangler.toml` 中的 `[vars]`
+- `TOPIC_MAP` KV 绑定声明（使用 `id` / `preview_id` 固定到现有命名空间，避免历史映射丢失）
+
+### 需要在 Cloudflare Dashboard 只配置一次的 Secrets
+路径：`Workers & Pages -> 你的 Worker -> Settings -> Variables and Secrets`
+
+必填：
+- `BOT_TOKEN`
+
+按需填写：
+- `WEBHOOK_SECRET`
+- `GROK_API_KEY`
+- `CF_TURNSTILE_SECRET_KEY`
+- `VERIFY_SIGNING_SECRET`
+
+配置完成后，后续 Git 自动部署无需重复录入这些值。
+
+### 注意
+- 如果你已有旧的 `TOPIC_MAP` 数据，不要依赖自动创建，直接在 `wrangler.toml` 写入已有 KV 的 `id` / `preview_id` 以避免丢失历史映射。
+
+---
+
+## Deployment Quick Link
+
+- Example config: `wrangler.toml.example`
+- Full guide: `DEPLOY.md`
+

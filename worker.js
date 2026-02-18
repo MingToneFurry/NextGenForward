@@ -134,6 +134,11 @@ const GLOBAL_SPAM_FILTER_RULES_KEY = "global_spam_filter:rules";
 const GLOBAL_SPAM_FILTER_RULES_PROMPT_KEY = "global_spam_filter:rules_prompt";
 // KV key：管理员编辑规则会话
 const SPAM_RULES_EDIT_SESSION_KEY_PREFIX = "spam_rules_edit_session:";
+// KV key：垃圾箱话题记录
+const RUBBISH_TOPIC_REC_KEY = "global_rubbish_topic:rec";
+// KV key 前缀：垃圾箱话题内“消息ID -> 用户ID”路由
+const RUBBISH_ROUTE_KEY_PREFIX = "rubbish_route:";
+const RUBBISH_ROUTE_TTL_SECONDS = 30 * 24 * 60 * 60;
 
 
 
@@ -1284,6 +1289,137 @@ async function notifyUserSpamDropped(env, userId) {
       text: "🗑️ 您刚发送的消息被系统识别为垃圾信息，已被拦截丢弃。如有误判请联系管理员处理。"
     });
   } catch (_) {}
+}
+
+function rubbishRouteKey(threadId, messageId) {
+  return `${RUBBISH_ROUTE_KEY_PREFIX}${threadId}:${messageId}`;
+}
+
+async function setRubbishRouteTargetUserId(env, threadId, messageId, userId) {
+  const t = Number(threadId);
+  const m = Number(messageId);
+  const u = Number(userId);
+  if (!Number.isFinite(t) || t <= 0) return;
+  if (!Number.isFinite(m) || m <= 0) return;
+  if (!Number.isFinite(u) || u <= 0) return;
+  await kvPut(env, rubbishRouteKey(t, m), String(u), { expirationTtl: RUBBISH_ROUTE_TTL_SECONDS });
+}
+
+async function getRubbishRouteTargetUserId(env, threadId, messageId) {
+  const t = Number(threadId);
+  const m = Number(messageId);
+  if (!Number.isFinite(t) || t <= 0) return null;
+  if (!Number.isFinite(m) || m <= 0) return null;
+  const raw = await kvGetText(env, rubbishRouteKey(t, m), CONFIG.KV_CRITICAL_CACHE_TTL);
+  if (!raw) return null;
+  const u = Number(raw);
+  return Number.isFinite(u) && u > 0 ? u : null;
+}
+
+async function getRubbishTopicThreadId(env) {
+  const rec = await kvGetJSON(env, RUBBISH_TOPIC_REC_KEY, null, {});
+  if (!rec || !rec.thread_id) return null;
+  const tid = Number(rec.thread_id);
+  return Number.isFinite(tid) && tid > 0 ? tid : null;
+}
+
+async function ensureRubbishTopicRec(env, opts = {}) {
+  const forceRecreate = !!(opts && opts.forceRecreate);
+
+  if (!forceRecreate) {
+    const rec = await kvGetJSON(env, RUBBISH_TOPIC_REC_KEY, null, {});
+    if (rec && rec.thread_id) {
+      const tid = Number(rec.thread_id);
+      if (Number.isFinite(tid) && tid > 0) return { ...rec, thread_id: tid };
+    }
+  }
+
+  const topicTitle = readEnvString(env, "RUBBISH_TOPIC_TITLE", "🗑️ rubbish").slice(0, CONFIG.MAX_TITLE_LENGTH) || "🗑️ rubbish";
+  const createRes = await tgCall(env, "createForumTopic", {
+    chat_id: env.SUPERGROUP_ID,
+    name: topicTitle
+  });
+  if (!createRes || !createRes.ok || !createRes.result?.message_thread_id) {
+    throw new Error(`create_rubbish_topic_failed:${createRes?.description || "unknown"}`);
+  }
+
+  const rec = {
+    thread_id: Number(createRes.result.message_thread_id),
+    title: topicTitle,
+    created_at: Date.now()
+  };
+  await kvPut(env, RUBBISH_TOPIC_REC_KEY, JSON.stringify(rec));
+  return rec;
+}
+
+function buildRubbishMetaText(msg, userId, verdict) {
+  const from = msg?.from || {};
+  const fn = String(from.first_name || "").trim();
+  const ln = String(from.last_name || "").trim();
+  const uname = String(from.username || "").trim();
+  const display = (fn || ln) ? `${fn} ${ln}`.trim() : (uname ? `@${uname}` : `User${userId}`);
+  const score = Number(verdict?.score);
+  const scoreText = Number.isFinite(score) ? score.toFixed(2) : "0.00";
+  const reason = verdict?.reason ? String(verdict.reason) : "unknown";
+  return [
+    "🗑️ 垃圾箱命中",
+    `用户：${display}`,
+    `用户ID：${userId}`,
+    `判定：${reason}`,
+    `置信度：${scoreText}`,
+    "提示：回复本条或下方转发消息，可直接回该用户（用于误伤处理）。"
+  ].join("\n");
+}
+
+async function archiveSpamToRubbish(env, msg, userId, verdict) {
+  try {
+    const sendToThread = async (threadId) => {
+      const metaRes = await tgCall(env, "sendMessage", withMessageThreadId({
+        chat_id: env.SUPERGROUP_ID,
+        message_thread_id: threadId,
+        text: buildRubbishMetaText(msg, userId, verdict),
+        disable_notification: true
+      }, threadId));
+
+      const copyRes = await tgCall(env, "copyMessage", withMessageThreadId({
+        chat_id: env.SUPERGROUP_ID,
+        message_thread_id: threadId,
+        from_chat_id: msg.chat.id,
+        message_id: msg.message_id,
+        disable_notification: true
+      }, threadId));
+
+      return { metaRes, copyRes };
+    };
+
+    let rec = await ensureRubbishTopicRec(env);
+    let { metaRes, copyRes } = await sendToThread(rec.thread_id);
+
+    if ((!metaRes?.ok && isTopicMissingOrDeleted(metaRes?.description)) ||
+        (!copyRes?.ok && isTopicMissingOrDeleted(copyRes?.description))) {
+      rec = await ensureRubbishTopicRec(env, { forceRecreate: true });
+      ({ metaRes, copyRes } = await sendToThread(rec.thread_id));
+    }
+
+    if (metaRes?.ok && metaRes?.result?.message_id) {
+      await setRubbishRouteTargetUserId(env, rec.thread_id, metaRes.result.message_id, userId);
+    }
+    if (copyRes?.ok && copyRes?.result?.message_id) {
+      await setRubbishRouteTargetUserId(env, rec.thread_id, copyRes.result.message_id, userId);
+    }
+
+    Logger.info("spam_archived_to_rubbish", {
+      userId,
+      threadId: rec.thread_id,
+      reason: verdict?.reason || "unknown",
+      score: verdict?.score
+    });
+  } catch (e) {
+    Logger.warn("spam_archive_to_rubbish_failed", {
+      userId,
+      error: String((e && e.message) ? e.message : e)
+    });
+  }
 }
 
 
@@ -2583,6 +2719,7 @@ async function resolveUserIdByThreadId(env, threadId, limit = CONFIG.KV_OPERATIO
 
 const GROUP_COMMANDS = [
     { command: "help", description: "显示使用说明" },
+    { command: "rubbish", description: "查看/重建垃圾箱话题" },
     { command: "trust", description: "将当前用户加入白名单" },
     { command: "ban", description: "封禁用户（可加用户ID）" },
     { command: "unban", description: "解封用户（可加用户ID）" },
@@ -6459,6 +6596,7 @@ async function handlePrivateMessage(msg, env, ctx, origin = null) {
         try {
             const verdict = await classifySpamOptional(env, msg);
             if (verdict && verdict.is_spam) {
+                await archiveSpamToRubbish(env, msg, userId, verdict);
                 await notifyUserSpamDropped(env, userId);
                 return;
             }
@@ -6553,6 +6691,7 @@ const msgId = msg.message_id;
  try {
      const verdict = await classifySpamOptional(env, msg);
      if (verdict && verdict.is_spam) {
+         await archiveSpamToRubbish(env, msg, userId, verdict);
          await notifyUserSpamDropped(env, userId);
          return;
      }
@@ -6614,6 +6753,7 @@ if (shouldSendNotice) {
     try {
         const verdict = await classifySpamOptional(env, msg);
         if (verdict && verdict.is_spam) {
+            await archiveSpamToRubbish(env, msg, userId, verdict);
             await notifyUserSpamDropped(env, userId);
             return;
         }
@@ -7354,6 +7494,7 @@ let rawPrompt = (msg.text || "").replace(/\u200b/g, "").trim();
                          `/blacklist 查看黑名单\n` +
                          `/info 查看当前用户信息\n` +
                          `/settings 打开设置面板\n` +
+                         `/rubbish 查看垃圾箱话题状态，或 /rubbish recreate 重建\n` +
                          `/clean ⚠️ 危险操作：删除当前话题用户的所有数据，将会删除该用户话题，清空该用户的聊天记录，并重置他的人机验证，但不会改变该用户的封禁状态或白名单状态`;
 
         await tgCall(env, "sendMessage", withMessageThreadId({
@@ -7399,6 +7540,83 @@ if (command === "settings") {
             reply_markup: panel.reply_markup
         }, threadId));
 
+        return;
+    }
+
+if (command === "rubbish") {
+        const adminId = msg.from?.id;
+        if (!adminId || !(await isAdminUser(env, adminId))) {
+            await tgCall(env, "sendMessage", withMessageThreadId({
+                chat_id: env.SUPERGROUP_ID,
+                message_thread_id: threadId,
+                text: ERROR_MESSAGES.admin_only
+            }, threadId));
+            return;
+        }
+
+        // 仅允许在 General 话题中使用
+        if (threadId && threadId !== 1) {
+            await tgCall(env, "sendMessage", withMessageThreadId({
+                chat_id: env.SUPERGROUP_ID,
+                message_thread_id: threadId,
+                text: "❌ 命令使用错误\n\n`/rubbish` 命令只能在 General 话题中使用。",
+                parse_mode: "Markdown"
+            }, threadId));
+            return;
+        }
+
+        const action = String(args || "").trim().toLowerCase();
+        const shouldRecreate = /^(recreate|reset|new|重建|重置)$/.test(action);
+
+        if (shouldRecreate) {
+            const oldThreadId = await getRubbishTopicThreadId(env);
+            const rec = await ensureRubbishTopicRec(env, { forceRecreate: true });
+            const oldText = oldThreadId ? String(oldThreadId) : "无";
+            await tgCall(env, "sendMessage", withMessageThreadId({
+                chat_id: env.SUPERGROUP_ID,
+                text:
+`✅ 垃圾箱话题已重建
+
+旧话题ID：${oldText}
+新话题ID：${rec.thread_id}
+话题名称：${rec.title}
+
+后续命中的垃圾消息将自动静音投递到新话题。`,
+                disable_notification: true
+            }, null));
+            return;
+        }
+
+        const rec = await kvGetJSON(env, RUBBISH_TOPIC_REC_KEY, null, {});
+        const threadIdNum = Number(rec?.thread_id || 0);
+        if (!Number.isFinite(threadIdNum) || threadIdNum <= 0) {
+            await tgCall(env, "sendMessage", withMessageThreadId({
+                chat_id: env.SUPERGROUP_ID,
+                text:
+`ℹ️ 当前未初始化垃圾箱话题。
+
+发送 \`/rubbish recreate\` 可立即创建。`,
+                parse_mode: "Markdown",
+                disable_notification: true
+            }, null));
+            return;
+        }
+
+        const probe = await probeForumThread(env, threadIdNum, { reason: "rubbish_status", doubleCheckOnMissingThreadId: false });
+        const statusText = (probe?.status === "ok") ? "✅ 正常" : `⚠️ 异常 (${probe?.status || "unknown"})`;
+        await tgCall(env, "sendMessage", withMessageThreadId({
+            chat_id: env.SUPERGROUP_ID,
+            text:
+`🗑️ 垃圾箱话题状态
+
+话题ID：${threadIdNum}
+话题名称：${rec?.title || "🗑️ rubbish"}
+状态：${statusText}
+
+如需重建：\`/rubbish recreate\``,
+            parse_mode: "Markdown",
+            disable_notification: true
+        }, null));
         return;
     }
 
@@ -8448,6 +8666,7 @@ const userInfo = await getUserInfo(env, userId);
     }
 
     let userId = null;
+    let routedFromRubbish = false;
     const mappedUser = await kvGetText(env, `thread:${threadId}`);
     if (mappedUser) {
         userId = Number(mappedUser);
@@ -8455,13 +8674,25 @@ const userInfo = await getUserInfo(env, userId);
         userId = await resolveUserIdByThreadId(env, threadId);
 }
 
+    if (!userId && msg.reply_to_message?.message_id) {
+        const routedUserId = await getRubbishRouteTargetUserId(env, threadId, msg.reply_to_message.message_id);
+        if (routedUserId) {
+            userId = routedUserId;
+            routedFromRubbish = true;
+        }
+    }
+
     if (!userId) return; 
+
+    if (routedFromRubbish) {
+        await setRubbishRouteTargetUserId(env, threadId, msg.message_id, userId);
+    }
 
     if (msg.media_group_id) {
         await handleMediaGroup(msg, env, ctx, { direction: "t2p", targetChat: userId, threadId: undefined });
         return;
     }
-    await tgCall(env, "copyMessage", { chat_id: userId, from_chat_id: env.SUPERGROUP_ID, message_id: msg.message_id });
+    await tgCall(env, "copyMessage", { chat_id: userId, from_chat_id: env.SUPERGROUP_ID, message_id: msg.message_id, disable_notification: true });
 }
 
 // ---------------- 其他辅助函数 ----------------

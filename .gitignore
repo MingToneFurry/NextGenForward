@@ -8,6 +8,8 @@
 # Cloudflare local state
 .wrangler/
 .vscode/
+.wrangler-secrets.bulk.json
+
 
 # Logs and temp artifacts
 *.log
