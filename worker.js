@@ -1423,7 +1423,15 @@ async function classifySpamOptional(env, msg) {
   const finish = async (finalVerdict, detail = {}) => {
     const processingMs = Math.max(0, Date.now() - startedAt);
     const usage = detail.aiUsage || detail.aiVerdict?.usage || finalVerdict?.usage || null;
-    const usageStats = await updateSpamUsageStats(env, usage);
+    let usageStats = buildSpamUsageStatsFallback(usage);
+    try {
+      usageStats = await updateSpamUsageStats(env, usage);
+    } catch (e) {
+      Logger.warn("spam_usage_stats_update_failed", {
+        userId: msg?.from?.id,
+        error: String((e && e.message) ? e.message : e)
+      });
+    }
     await archiveSpamJudgeLog(env, msg, finalVerdict, {
       text,
       replyContextText,
@@ -1479,14 +1487,14 @@ async function classifySpamOptional(env, msg) {
   if (typeof ruleVerdict.reason === "string" && ruleVerdict.reason.startsWith("allow_")) {
     return await finishAndCache(
       { ...ruleVerdict, ai_used: false },
-      { source: "allow_rule", ruleVerdict, aiVerdict: null }
+      { source: "allow_rule", ruleVerdict, aiVerdict: null, aiThreshold: (rules && rules.ai ? rules.ai.threshold : DEFAULT_SPAM_RULES.ai.threshold) }
     );
   }
 
   if (ruleVerdict.is_spam) {
     return await finishAndCache(
       { ...ruleVerdict, ai_used: false },
-      { source: "rule_match", ruleVerdict, aiVerdict: null }
+      { source: "rule_match", ruleVerdict, aiVerdict: null, aiThreshold: (rules && rules.ai ? rules.ai.threshold : DEFAULT_SPAM_RULES.ai.threshold) }
     );
   }
 
@@ -1497,14 +1505,14 @@ async function classifySpamOptional(env, msg) {
     const isSpam = ai.is_spam && ai.score >= (rules && rules.ai ? rules.ai.threshold : DEFAULT_SPAM_RULES.ai.threshold);
     return await finishAndCache(
       { is_spam: !!isSpam, score: ai.score, reason: ai.reason, ai_used: true },
-      { source: "ai_only", ruleVerdict, aiVerdict: ai, aiUsage: ai.usage || null }
+      { source: "ai_only", ruleVerdict, aiVerdict: ai, aiUsage: ai.usage || null, aiThreshold: (rules && rules.ai ? rules.ai.threshold : DEFAULT_SPAM_RULES.ai.threshold) }
     );
   }
 
   // Grok 无有效返回时默认放行，避免因额度/网络问题误伤正常用户
   return await finishAndCache(
     { is_spam: false, score: 0.0, reason: "rule:no_match", ai_used: false },
-    { source: "no_match", ruleVerdict, aiVerdict: null }
+    { source: "no_match", ruleVerdict, aiVerdict: null, aiThreshold: (rules && rules.ai ? rules.ai.threshold : DEFAULT_SPAM_RULES.ai.threshold) }
   );
 }
 
@@ -1621,11 +1629,30 @@ async function ensureLogTopicRec(env, opts = {}) {
 
 
 
-async function updateSpamUsageStats(env, usage = null) {
+function buildSpamUsageStatsFallback(usage = null) {
   const promptTokens = Math.max(0, Math.floor(Number(usage?.prompt_tokens || 0)));
   const completionTokens = Math.max(0, Math.floor(Number(usage?.completion_tokens || 0)));
-  const currentTotal = promptTokens + completionTokens;
+  return {
+    current: {
+      prompt_tokens: promptTokens,
+      completion_tokens: completionTokens,
+      total_tokens: promptTokens + completionTokens
+    },
+    totals: {
+      messages_total: 0,
+      input_tokens_total: 0,
+      output_tokens_total: 0
+    }
+  };
+}
 
+async function updateSpamUsageStats(env, usage = null) {
+  const fallback = buildSpamUsageStatsFallback(usage);
+  const promptTokens = fallback.current.prompt_tokens;
+  const completionTokens = fallback.current.completion_tokens;
+  const currentTotal = fallback.current.total_tokens;
+
+  // NOTE: Cloudflare KV read-modify-write is non-atomic; counters are best-effort approximations under high concurrency.
   const stats = await kvGetJSON(env, SPAM_USAGE_STATS_KEY, null, {});
   const prevMessages = Math.max(0, Math.floor(Number(stats?.messages_total || 0)));
   const prevInput = Math.max(0, Math.floor(Number(stats?.input_tokens_total || 0)));
@@ -1712,9 +1739,14 @@ function buildSpamJudgeLogMetaText(msg, finalVerdict, detail = {}) {
   const totalMessages = Math.max(0, Math.floor(Number(totalUsage.messages_total || 0)));
   const totalInputTokens = Math.max(0, Math.floor(Number(totalUsage.input_tokens_total || 0)));
   const totalOutputTokens = Math.max(0, Math.floor(Number(totalUsage.output_tokens_total || 0)));
-  const actionLine = finalScore < 0.85
-    ? "操作: 已保留 (置信度 < 85: 10分)"
-    : "操作: 已拦截 (置信度 ≥ 85: 0分)";
+  const aiThreshold = Number(detail.aiThreshold);
+  const threshold = Number.isFinite(aiThreshold)
+    ? aiThreshold
+    : (DEFAULT_SPAM_RULES?.ai?.threshold ?? 0.65);
+  const moderationScore = finalIsSpam ? 0 : 10;
+  const actionLine = finalIsSpam
+    ? `操作: 已拦截 (置信度 ${finalScoreText} ≥ 阈值 ${threshold.toFixed(2)}，评分: ${moderationScore}分)`
+    : `操作: 已保留 (置信度 ${finalScoreText} < 阈值 ${threshold.toFixed(2)}，评分: ${moderationScore}分)`;
 
   const lines = [
     "[log] spam_judgement",
@@ -1732,7 +1764,7 @@ function buildSpamJudgeLogMetaText(msg, finalVerdict, detail = {}) {
     `media: ${mediaFlags.length ? mediaFlags.join(",") : "none"}`,
     `text: ${textPreview}`,
     `⏱️ 处理时间: ${processingSecText}秒`,
-    `消耗令牌 (初始): ${currentPrompt} 输入, ${currentCompletion} 输出`,
+    `本次消耗令牌: ${currentPrompt} 输入, ${currentCompletion} 输出`,
     `本次消息总消耗令牌: ${currentTotal}`,
     `已处理消息总数: ${totalMessages}`,
     `累计消耗令牌: ${totalInputTokens} 输入令牌, ${totalOutputTokens} 输出令牌`,
