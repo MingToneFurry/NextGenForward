@@ -132,6 +132,8 @@ const RUBBISH_ROUTE_KEY_PREFIX = "rubbish_route:";
 const RUBBISH_ROUTE_TTL_SECONDS = 30 * 24 * 60 * 60;
 // KV key：日志话题记录（保存每次垃圾判断详情）
 const LOG_TOPIC_REC_KEY = "global_log_topic:rec";
+// KV key：垃圾判定令牌与消息累计统计（长期保留）
+const SPAM_USAGE_STATS_KEY = "spam_usage_stats:global";
 
 
 
@@ -1302,7 +1304,14 @@ confidence 映射（严格遵守，谐音计入信号强度）：
           content_preview: String(content || "").slice(0, 240)
         });
       }
-      return normalizeVerdict(parsed);
+      const verdict = normalizeVerdict(parsed);
+      const usage = {
+        prompt_tokens: Math.max(0, Math.floor(Number(data?.usage?.prompt_tokens || 0))),
+        completion_tokens: Math.max(0, Math.floor(Number(data?.usage?.completion_tokens || 0)))
+      };
+      usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
+      if (!verdict) return null;
+      return { verdict, usage };
     } finally {
       clearTimeout(timeoutId);
     }
@@ -1319,11 +1328,11 @@ confidence 映射（严格遵守，谐音计入信号强度）：
 
       // 1) 首选：要求 JSON 对象输出
       try {
-        const verdict = await callGrok({
+        const result = await callGrok({
           ...basePayload,
           response_format: { type: "json_object" }
         });
-        if (verdict) return verdict;
+        if (result && result.verdict) return result;
       } catch (e1) {
         hadTransportError = true;
         Logger.warn("grok_spam_json_object_failed", {
@@ -1335,8 +1344,8 @@ confidence 映射（严格遵守，谐音计入信号强度）：
 
       // 2) 回退：不强制 response_format，继续从文本里提取 JSON
       try {
-        const verdict2 = await callGrok(basePayload);
-        if (verdict2) return verdict2;
+        const result2 = await callGrok(basePayload);
+        if (result2 && result2.verdict) return result2;
       } catch (e2) {
         hadTransportError = true;
         Logger.warn("grok_spam_fallback_failed", {
@@ -1387,14 +1396,21 @@ confidence 映射（严格遵守，谐音计入信号强度）：
       temperature: 0
     };
 
-    const visualVerdict = await runPayload(visualPayload);
-    if (visualVerdict) return visualVerdict;
+    const visualResult = await runPayload(visualPayload);
+    if (visualResult && visualResult.verdict) {
+      return { ...visualResult.verdict, usage: visualResult.usage || null };
+    }
   }
 
-  return await runPayload(textOnlyPayload);
+  const textResult = await runPayload(textOnlyPayload);
+  if (textResult && textResult.verdict) {
+    return { ...textResult.verdict, usage: textResult.usage || null };
+  }
+  return null;
 }
 
 async function classifySpamOptional(env, msg) {
+  const startedAt = Date.now();
   const text = extractTextFromTelegramMessage(msg);
   const replyContextText = extractReplyContextText(msg);
   const mergedText = [text, replyContextText].filter(Boolean).join("\n");
@@ -1402,14 +1418,20 @@ async function classifySpamOptional(env, msg) {
   const crossChannelInfo = detectCrossChannelReply(msg);
   const crossChannel = !!crossChannelInfo.isCrossChannel;
   const cacheKey = buildSpamVerdictCacheKey(msg, mergedText);
+  const cacheTtl = getSpamVerdictCacheTtlSeconds(env);
 
   const finish = async (finalVerdict, detail = {}) => {
+    const processingMs = Math.max(0, Date.now() - startedAt);
+    const usage = detail.aiUsage || finalVerdict?.usage || null;
+    const usageStats = await updateSpamUsageStats(env, usage);
     await archiveSpamJudgeLog(env, msg, finalVerdict, {
       text,
       replyContextText,
       spamEnabled: enabled,
       crossChannel,
       crossChannelInfo,
+      processingMs,
+      usageStats,
       ...detail
     });
     return finalVerdict;
@@ -1421,7 +1443,7 @@ async function classifySpamOptional(env, msg) {
         finalVerdict,
         source: String(detail.source || "unknown"),
         ts: Date.now()
-      }, CONFIG.SPAM_VERDICT_CACHE_TTL_SECONDS);
+      }, cacheTtl);
     }
     return await finish(finalVerdict, detail);
   };
@@ -1490,7 +1512,7 @@ async function notifyUserSpamDropped(env, userId, msg = null, verdict = null) {
   try {
     const payload = {
       chat_id: userId,
-      text: "🗑️ 您刚发送的消息被系统识别为垃圾信息，已被拦截丢弃（本提醒为对该消息的回复/引用）。如有误判请联系管理员处理。"
+      text: "您的此条消息被系统识别为垃圾信息，已被拦截丢弃。\n如有误判，请尝试换种说法或联系管理员处理。"
     };
     if (msg && Number.isFinite(Number(msg.message_id))) {
       payload.reply_to_message_id = Number(msg.message_id);
@@ -1597,6 +1619,40 @@ async function ensureLogTopicRec(env, opts = {}) {
   return rec;
 }
 
+
+
+async function updateSpamUsageStats(env, usage = null) {
+  const promptTokens = Math.max(0, Math.floor(Number(usage?.prompt_tokens || 0)));
+  const completionTokens = Math.max(0, Math.floor(Number(usage?.completion_tokens || 0)));
+  const currentTotal = promptTokens + completionTokens;
+
+  const stats = await kvGetJSON(env, SPAM_USAGE_STATS_KEY, null, {});
+  const prevMessages = Math.max(0, Math.floor(Number(stats?.messages_total || 0)));
+  const prevInput = Math.max(0, Math.floor(Number(stats?.input_tokens_total || 0)));
+  const prevOutput = Math.max(0, Math.floor(Number(stats?.output_tokens_total || 0)));
+
+  const next = {
+    messages_total: prevMessages + 1,
+    input_tokens_total: prevInput + promptTokens,
+    output_tokens_total: prevOutput + completionTokens,
+    updated_at: Date.now()
+  };
+
+  await kvPut(env, SPAM_USAGE_STATS_KEY, JSON.stringify(next));
+
+  return {
+    current: {
+      prompt_tokens: promptTokens,
+      completion_tokens: completionTokens,
+      total_tokens: currentTotal
+    },
+    totals: {
+      messages_total: next.messages_total,
+      input_tokens_total: next.input_tokens_total,
+      output_tokens_total: next.output_tokens_total
+    }
+  };
+}
 function buildLogTextPreview(text, maxLen = 600) {
   const t = String(text || "").replace(/\s+/g, " ").trim();
   if (!t) return "[NO_TEXT_CONTENT]";
@@ -1645,6 +1701,20 @@ function buildSpamJudgeLogMetaText(msg, finalVerdict, detail = {}) {
   const spamEnabled = detail.spamEnabled === true ? "true" : (detail.spamEnabled === false ? "false" : "unknown");
   const crossChannel = detail.crossChannel === true ? "true" : "false";
   const cacheHit = detail.cacheHit === true ? "true" : "false";
+  const processingSec = Math.max(0, Number(detail.processingMs || 0)) / 1000;
+  const processingSecText = Number.isFinite(processingSec) ? processingSec.toFixed(1) : "0.0";
+  const usageStats = detail.usageStats || {};
+  const currentUsage = usageStats.current || {};
+  const totalUsage = usageStats.totals || {};
+  const currentPrompt = Math.max(0, Math.floor(Number(currentUsage.prompt_tokens || 0)));
+  const currentCompletion = Math.max(0, Math.floor(Number(currentUsage.completion_tokens || 0)));
+  const currentTotal = Math.max(0, Math.floor(Number(currentUsage.total_tokens || (currentPrompt + currentCompletion))));
+  const totalMessages = Math.max(0, Math.floor(Number(totalUsage.messages_total || 0)));
+  const totalInputTokens = Math.max(0, Math.floor(Number(totalUsage.input_tokens_total || 0)));
+  const totalOutputTokens = Math.max(0, Math.floor(Number(totalUsage.output_tokens_total || 0)));
+  const actionLine = finalScore < 0.85
+    ? "操作: 已保留 (置信度 < 85: 10分)"
+    : "操作: 已拦截 (置信度 ≥ 85: 0分)";
 
   const lines = [
     "[log] spam_judgement",
@@ -1660,7 +1730,13 @@ function buildSpamJudgeLogMetaText(msg, finalVerdict, detail = {}) {
     `rule: spam=${ruleIsSpam} score=${ruleScoreText} reason=${ruleReason}`,
     `ai: spam=${aiIsSpam} score=${aiScoreText} reason=${aiReason}`,
     `media: ${mediaFlags.length ? mediaFlags.join(",") : "none"}`,
-    `text: ${textPreview}`
+    `text: ${textPreview}`,
+    `⏱️ 处理时间: ${processingSecText}秒`,
+    `消耗令牌 (初始): ${currentPrompt} 输入, ${currentCompletion} 输出`,
+    `本次消息总消耗令牌: ${currentTotal}`,
+    `已处理消息总数: ${totalMessages}`,
+    `累计消耗令牌: ${totalInputTokens} 输入令牌, ${totalOutputTokens} 输出令牌`,
+    actionLine
   ];
   if (aiSignals) lines.push(`ai_signals: ${aiSignals}`);
   return lines.join("\n");
@@ -2427,6 +2503,13 @@ function getVerifiedTtlSeconds(env) {
     const raw = env?.VERIFIED_TTL_SECONDS ?? CONFIG.VERIFIED_TTL_SECONDS_DEFAULT;
     const n = Math.floor(Number(raw));
     if (!Number.isFinite(n) || n <= 0) return 0;
+    return Math.max(60, n);
+}
+
+function getSpamVerdictCacheTtlSeconds(env) {
+    const raw = env?.SPAM_VERDICT_CACHE_TTL_SECONDS ?? CONFIG.SPAM_VERDICT_CACHE_TTL_SECONDS;
+    const n = Math.floor(Number(raw));
+    if (!Number.isFinite(n) || n <= 0) return Math.max(60, CONFIG.SPAM_VERDICT_CACHE_TTL_SECONDS);
     return Math.max(60, n);
 }
 
