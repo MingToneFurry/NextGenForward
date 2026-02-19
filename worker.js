@@ -1540,10 +1540,12 @@ async function classifySpamOptional(env, msg) {
   }
 
   // Grok 无有效返回时默认放行，避免因额度/网络问题误伤正常用户
+  const aiParseFailed = ai && ai.parse_failed === true;
   return await finishAndCache(
     { is_spam: false, score: 0.0, reason: "rule:no_match", ai_used: false },
     {
-      source: ai && ai.parse_failed === true ? "ai_parse_failed" : "no_match",
+      source: aiParseFailed ? "ai_parse_failed" : "no_match",
+      cacheable: aiParseFailed ? false : undefined,
       ruleVerdict,
       aiVerdict: null,
       aiUsage: ai?.usage || null,
