@@ -1310,18 +1310,32 @@ confidence 映射（严格遵守，谐音计入信号强度）：
         completion_tokens: Math.max(0, Math.floor(Number(data?.usage?.completion_tokens || 0)))
       };
       usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
-      if (!verdict) return null;
-      return { verdict, usage };
+      return { verdict: verdict || null, usage };
     } finally {
       clearTimeout(timeoutId);
     }
   }
 
+  function mergeUsageTotals(base = null, extra = null) {
+    const basePrompt = Math.max(0, Math.floor(Number(base?.prompt_tokens || 0)));
+    const baseCompletion = Math.max(0, Math.floor(Number(base?.completion_tokens || 0)));
+    const extraPrompt = Math.max(0, Math.floor(Number(extra?.prompt_tokens || 0)));
+    const extraCompletion = Math.max(0, Math.floor(Number(extra?.completion_tokens || 0)));
+    const prompt = basePrompt + extraPrompt;
+    const completion = baseCompletion + extraCompletion;
+    return {
+      prompt_tokens: prompt,
+      completion_tokens: completion,
+      total_tokens: prompt + completion
+    };
+  }
+
   async function runPayload(basePayload) {
     // 模型可能返回“思考+JSON”，因此：
-    // 1) 先在文本里提取 JSON；2) 失败后重试 3 次；3) 全失败则返回 null（上层放行）
+    // 1) 先在文本里提取 JSON；2) 失败后重试 3 次；3) 全失败则返回 null 判决（上层放行）
     const maxRetries = 3;
     const maxAttempts = maxRetries + 1;
+    let accumulatedUsage = null;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       let hadTransportError = false;
@@ -1332,7 +1346,10 @@ confidence 映射（严格遵守，谐音计入信号强度）：
           ...basePayload,
           response_format: { type: "json_object" }
         });
-        if (result && result.verdict) return result;
+        if (result && result.usage) accumulatedUsage = mergeUsageTotals(accumulatedUsage, result.usage);
+        if (result && result.verdict) {
+          return { verdict: result.verdict, usage: accumulatedUsage || result.usage || null };
+        }
       } catch (e1) {
         hadTransportError = true;
         Logger.warn("grok_spam_json_object_failed", {
@@ -1345,7 +1362,10 @@ confidence 映射（严格遵守，谐音计入信号强度）：
       // 2) 回退：不强制 response_format，继续从文本里提取 JSON
       try {
         const result2 = await callGrok(basePayload);
-        if (result2 && result2.verdict) return result2;
+        if (result2 && result2.usage) accumulatedUsage = mergeUsageTotals(accumulatedUsage, result2.usage);
+        if (result2 && result2.verdict) {
+          return { verdict: result2.verdict, usage: accumulatedUsage || result2.usage || null };
+        }
       } catch (e2) {
         hadTransportError = true;
         Logger.warn("grok_spam_fallback_failed", {
@@ -1367,8 +1387,11 @@ confidence 映射（严格遵守，谐音计入信号强度）：
       }
     }
 
-    Logger.warn("grok_spam_all_attempts_failed_allow_pass", { maxAttempts });
-    return null;
+    Logger.warn("grok_spam_all_attempts_failed_allow_pass", {
+      maxAttempts,
+      usage_tokens: Math.max(0, Math.floor(Number(accumulatedUsage?.total_tokens || 0)))
+    });
+    return { verdict: null, usage: accumulatedUsage };
   }
 
   const textOnlyPayload = {
@@ -1379,6 +1402,8 @@ confidence 映射（严格遵守，谐音计入信号强度）：
     ],
     temperature: 0
   };
+
+  let aiUsage = null;
 
   if (hasVisual) {
     const visualPayload = {
@@ -1397,14 +1422,19 @@ confidence 映射（严格遵守，谐音计入信号强度）：
     };
 
     const visualResult = await runPayload(visualPayload);
+    if (visualResult && visualResult.usage) aiUsage = mergeUsageTotals(aiUsage, visualResult.usage);
     if (visualResult && visualResult.verdict) {
-      return { ...visualResult.verdict, usage: visualResult.usage || null };
+      return { ...visualResult.verdict, usage: aiUsage || visualResult.usage || null };
     }
   }
 
   const textResult = await runPayload(textOnlyPayload);
+  if (textResult && textResult.usage) aiUsage = mergeUsageTotals(aiUsage, textResult.usage);
   if (textResult && textResult.verdict) {
-    return { ...textResult.verdict, usage: textResult.usage || null };
+    return { ...textResult.verdict, usage: aiUsage || textResult.usage || null };
+  }
+  if (aiUsage) {
+    return { usage: aiUsage, parse_failed: true };
   }
   return null;
 }
@@ -1500,7 +1530,7 @@ async function classifySpamOptional(env, msg) {
 
   const ai = await aiSpamVerdict(env, msg, text, rules, crossChannelInfo, replyContextText);
 
-  if (ai) {
+  if (ai && ai.parse_failed !== true && typeof ai.is_spam === "boolean") {
     // v1.6.0: 阈值统一为 0.65（sanitizeSpamRules 已固定），这里继续沿用 rules.ai.threshold 以保持一致
     const isSpam = ai.is_spam && ai.score >= (rules && rules.ai ? rules.ai.threshold : DEFAULT_SPAM_RULES.ai.threshold);
     return await finishAndCache(
@@ -1512,7 +1542,13 @@ async function classifySpamOptional(env, msg) {
   // Grok 无有效返回时默认放行，避免因额度/网络问题误伤正常用户
   return await finishAndCache(
     { is_spam: false, score: 0.0, reason: "rule:no_match", ai_used: false },
-    { source: "no_match", ruleVerdict, aiVerdict: null, aiThreshold: (rules && rules.ai ? rules.ai.threshold : DEFAULT_SPAM_RULES.ai.threshold) }
+    {
+      source: ai && ai.parse_failed === true ? "ai_parse_failed" : "no_match",
+      ruleVerdict,
+      aiVerdict: null,
+      aiUsage: ai?.usage || null,
+      aiThreshold: (rules && rules.ai ? rules.ai.threshold : DEFAULT_SPAM_RULES.ai.threshold)
+    }
   );
 }
 
