@@ -21,6 +21,7 @@ WORKER_URL = "https://your-worker.workers.dev/"
 ADMIN_IDS = "123456789,987654321"
 RUBBISH_TOPIC_TITLE = "rubbish"
 LOG_TOPIC_TITLE = "log"
+SPAM_VERDICT_CACHE_TTL_SECONDS = "2592000"
 VERIFIED_TTL_SECONDS = "86400"
 
 # Grok optional non-secret config
