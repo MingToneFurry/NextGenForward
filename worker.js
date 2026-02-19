@@ -692,6 +692,7 @@ function buildSpamVerdictCacheKey(msg, mergedText = "") {
   const chatId = String(msg?.chat?.id || "0");
   const userId = String(msg?.from?.id || "0");
   const mediaSig = [msg?.photo ? "p" : "", msg?.video ? "v" : "", msg?.document ? "d" : "", msg?.audio ? "a" : ""].join("");
+  const mediaIdentity = extractSpamCacheMediaIdentity(msg);
   const normalized = String(mergedText || "").replace(/\s+/g, " ").trim().toLowerCase().slice(0, 2000);
   let hash = 2166136261;
   for (let i = 0; i < normalized.length; i++) {
@@ -699,7 +700,33 @@ function buildSpamVerdictCacheKey(msg, mergedText = "") {
     hash = Math.imul(hash, 16777619) >>> 0;
   }
   const digest = (hash >>> 0).toString(16);
-  return `spam_verdict:${chatId}:${userId}:${mediaSig || "none"}:${digest}`;
+  return `spam_verdict:${chatId}:${userId}:${mediaSig || "none"}:${mediaIdentity}:${digest}`;
+}
+
+function extractSpamCacheMediaIdentity(msg) {
+  if (!msg || typeof msg !== "object") return "none";
+
+  const candidates = [];
+  const appendIdentity = (mediaType, payload) => {
+    if (!payload || typeof payload !== "object") return;
+    const stableId = payload.file_unique_id || payload.file_id;
+    if (stableId) candidates.push(`${mediaType}:${String(stableId)}`);
+  };
+
+  if (Array.isArray(msg.photo) && msg.photo.length > 0) {
+    appendIdentity("p", msg.photo[msg.photo.length - 1]);
+  }
+  appendIdentity("v", msg.video);
+  appendIdentity("d", msg.document);
+  appendIdentity("a", msg.audio);
+
+  if (msg.media_group_id) {
+    candidates.push(`g:${String(msg.media_group_id)}`);
+  }
+
+  if (!candidates.length) return "none";
+  candidates.sort();
+  return candidates.join("|").slice(0, 512);
 }
 
 function normalizeChatId(value) {
