@@ -13,7 +13,8 @@ const CONFIG = {
     VERIFY_FINALIZE_EXPIRE_SECONDS: 600, // 通过网页验证后，点击完成激活按钮的有效期（秒）
     VERIFIED_GRACE_SECONDS: 300,        // 完成验证后宽限窗口（秒），用于兜底 KV 跨 PoP 传播/负缓存
     VERIFIED_TTL_SECONDS_DEFAULT: 0,    // verified 键默认不过期；可用环境变量 VERIFIED_TTL_SECONDS 覆盖（>0 生效）
-    KV_CRITICAL_CACHE_TTL: 60,           // 关键键 KV.get 的 cacheTtl（秒），Cloudflare KV 最小为 60；不要设为 0
+    KV_CRITICAL_CACHE_TTL: 300,          // 关键键 KV.get 的 cacheTtl（秒），默认 5 分钟以减少频繁读取；Cloudflare KV 最小为 60；不要设为 0
+    SPAM_VERDICT_CACHE_TTL_SECONDS: 600, // 垃圾判定结果缓存 TTL（秒），用于重复消息快速命中
     TURNSTILE_ACTION: "tg_verify",      // Turnstile action（前端 render + 服务端校验），可留空禁用
     PENDING_MAX_MESSAGES: 10,          // 人机验证期间最多暂存消息数量，不可设为0
     
@@ -685,6 +686,47 @@ function extractReplyContextText(msg) {
 
   if (!candidates.length) return "";
   return candidates.join("\n").slice(0, 2000);
+}
+
+function buildSpamVerdictCacheKey(msg, mergedText = "") {
+  const chatId = String(msg?.chat?.id || "0");
+  const userId = String(msg?.from?.id || "0");
+  const mediaSig = [msg?.photo ? "p" : "", msg?.video ? "v" : "", msg?.document ? "d" : "", msg?.audio ? "a" : ""].join("");
+  const mediaIdentity = extractSpamCacheMediaIdentity(msg);
+  const normalized = String(mergedText || "").replace(/\s+/g, " ").trim().toLowerCase().slice(0, 2000);
+  let hash = 2166136261;
+  for (let i = 0; i < normalized.length; i++) {
+    hash ^= normalized.charCodeAt(i);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  const digest = (hash >>> 0).toString(16);
+  return `spam_verdict:${chatId}:${userId}:${mediaSig || "none"}:${mediaIdentity}:${digest}`;
+}
+
+function extractSpamCacheMediaIdentity(msg) {
+  if (!msg || typeof msg !== "object") return "none";
+
+  const candidates = [];
+  const appendIdentity = (mediaType, payload) => {
+    if (!payload || typeof payload !== "object") return;
+    const stableId = payload.file_unique_id || payload.file_id;
+    if (stableId) candidates.push(`${mediaType}:${String(stableId)}`);
+  };
+
+  if (Array.isArray(msg.photo) && msg.photo.length > 0) {
+    appendIdentity("p", msg.photo[msg.photo.length - 1]);
+  }
+  appendIdentity("v", msg.video);
+  appendIdentity("d", msg.document);
+  appendIdentity("a", msg.audio);
+
+  if (msg.media_group_id) {
+    candidates.push(`g:${String(msg.media_group_id)}`);
+  }
+
+  if (!candidates.length) return "none";
+  candidates.sort();
+  return candidates.join("|").slice(0, 512);
 }
 
 function normalizeChatId(value) {
@@ -1359,6 +1401,7 @@ async function classifySpamOptional(env, msg) {
   const enabled = await getGlobalSpamFilterEnabled(env);
   const crossChannelInfo = detectCrossChannelReply(msg);
   const crossChannel = !!crossChannelInfo.isCrossChannel;
+  const cacheKey = buildSpamVerdictCacheKey(msg, mergedText);
 
   const finish = async (finalVerdict, detail = {}) => {
     await archiveSpamJudgeLog(env, msg, finalVerdict, {
@@ -1372,6 +1415,17 @@ async function classifySpamOptional(env, msg) {
     return finalVerdict;
   };
 
+  const finishAndCache = async (finalVerdict, detail = {}) => {
+    if (cacheKey && detail.cacheable !== false && enabled && !crossChannel) {
+      await cachePutJSON(cacheKey, {
+        finalVerdict,
+        source: String(detail.source || "unknown"),
+        ts: Date.now()
+      }, CONFIG.SPAM_VERDICT_CACHE_TTL_SECONDS);
+    }
+    return await finish(finalVerdict, detail);
+  };
+
   if (!enabled) {
     return await finish(
       { is_spam: false, score: 0.0, reason: "spam_filter_disabled", ai_used: false },
@@ -1382,53 +1436,67 @@ async function classifySpamOptional(env, msg) {
   if (crossChannel) {
     return await finish(
       { is_spam: true, score: 1.0, reason: "rule:cross_channel_reply", ai_used: false },
-      { source: "cross_channel_reply", crossChannelInfo }
+      { source: "cross_channel_reply", crossChannelInfo, cacheable: false }
     );
+  }
+
+  const cachedVerdict = await cacheGetJSON(cacheKey, null);
+  if (cachedVerdict && cachedVerdict.finalVerdict && typeof cachedVerdict.finalVerdict === "object") {
+    return await finish(cachedVerdict.finalVerdict, {
+      source: "cache_hit",
+      cacheHit: true,
+      cacheable: false,
+      cacheSource: String(cachedVerdict.source || "unknown")
+    });
   }
 
   const rules = await getGlobalSpamFilterRules(env);
   const ruleVerdict = ruleBasedSpamVerdict(mergedText, rules);
 
-  // 无论本地规则结果如何，都调用一次 Grok 垃圾识别（满足“每条请求都做一次 AI 判断”）
-  const ai = await aiSpamVerdict(env, msg, text, rules, crossChannelInfo, replyContextText);
-
-  // 放行规则优先：仍会执行一次 Grok 判断，但最终放行
+  // 规则优先：只要命中本地规则（放行或拦截），就不再调用 AI
   if (typeof ruleVerdict.reason === "string" && ruleVerdict.reason.startsWith("allow_")) {
-    return await finish(
-      { ...ruleVerdict, ai_used: !!ai },
-      { source: "allow_rule", ruleVerdict, aiVerdict: ai }
+    return await finishAndCache(
+      { ...ruleVerdict, ai_used: false },
+      { source: "allow_rule", ruleVerdict, aiVerdict: null }
     );
   }
 
   if (ruleVerdict.is_spam) {
-    return await finish(
-      { ...ruleVerdict, ai_used: !!ai },
-      { source: "rule_match", ruleVerdict, aiVerdict: ai }
+    return await finishAndCache(
+      { ...ruleVerdict, ai_used: false },
+      { source: "rule_match", ruleVerdict, aiVerdict: null }
     );
   }
+
+  const ai = await aiSpamVerdict(env, msg, text, rules, crossChannelInfo, replyContextText);
 
   if (ai) {
     // v1.6.0: 阈值统一为 0.65（sanitizeSpamRules 已固定），这里继续沿用 rules.ai.threshold 以保持一致
     const isSpam = ai.is_spam && ai.score >= (rules && rules.ai ? rules.ai.threshold : DEFAULT_SPAM_RULES.ai.threshold);
-    return await finish(
+    return await finishAndCache(
       { is_spam: !!isSpam, score: ai.score, reason: ai.reason, ai_used: true },
       { source: "ai_only", ruleVerdict, aiVerdict: ai }
     );
   }
 
   // Grok 无有效返回时默认放行，避免因额度/网络问题误伤正常用户
-  return await finish(
+  return await finishAndCache(
     { is_spam: false, score: 0.0, reason: "rule:no_match", ai_used: false },
     { source: "no_match", ruleVerdict, aiVerdict: null }
   );
 }
 
-async function notifyUserSpamDropped(env, userId) {
+async function notifyUserSpamDropped(env, userId, msg = null, verdict = null) {
   try {
-    await tgCall(env, "sendMessage", {
+    const payload = {
       chat_id: userId,
-      text: "🗑️ 您刚发送的消息被系统识别为垃圾信息，已被拦截丢弃。如有误判请联系管理员处理。"
-    });
+      text: "🗑️ 您刚发送的消息被系统识别为垃圾信息，已被拦截丢弃（本提醒为对该消息的回复/引用）。如有误判请联系管理员处理。"
+    };
+    if (msg && Number.isFinite(Number(msg.message_id))) {
+      payload.reply_to_message_id = Number(msg.message_id);
+      payload.allow_sending_without_reply = true;
+    }
+    await tgCall(env, "sendMessage", payload);
   } catch (_) {}
 }
 
@@ -1576,6 +1644,7 @@ function buildSpamJudgeLogMetaText(msg, finalVerdict, detail = {}) {
   const source = String(detail.source || "unknown");
   const spamEnabled = detail.spamEnabled === true ? "true" : (detail.spamEnabled === false ? "false" : "unknown");
   const crossChannel = detail.crossChannel === true ? "true" : "false";
+  const cacheHit = detail.cacheHit === true ? "true" : "false";
 
   const lines = [
     "[log] spam_judgement",
@@ -1586,6 +1655,7 @@ function buildSpamJudgeLogMetaText(msg, finalVerdict, detail = {}) {
     `source: ${source}`,
     `spam_filter_enabled: ${spamEnabled}`,
     `cross_channel_reply: ${crossChannel}`,
+    `cache_hit: ${cacheHit}`,
     `final: spam=${finalIsSpam} score=${finalScoreText} reason=${finalReason} ai_used=${aiUsed}`,
     `rule: spam=${ruleIsSpam} score=${ruleScoreText} reason=${ruleReason}`,
     `ai: spam=${aiIsSpam} score=${aiScoreText} reason=${aiReason}`,
@@ -6876,7 +6946,7 @@ async function handlePrivateMessage(msg, env, ctx, origin = null) {
             const verdict = await classifySpamOptional(env, msg);
             if (verdict && verdict.is_spam) {
                 await archiveSpamToRubbish(env, msg, userId, verdict);
-                await notifyUserSpamDropped(env, userId);
+                await notifyUserSpamDropped(env, userId, msg, verdict);
                 return;
             }
         } catch (_) {}
@@ -6971,7 +7041,7 @@ const msgId = msg.message_id;
      const verdict = await classifySpamOptional(env, msg);
      if (verdict && verdict.is_spam) {
          await archiveSpamToRubbish(env, msg, userId, verdict);
-         await notifyUserSpamDropped(env, userId);
+         await notifyUserSpamDropped(env, userId, msg, verdict);
          return;
      }
  } catch (_) {}
@@ -7033,7 +7103,7 @@ if (shouldSendNotice) {
         const verdict = await classifySpamOptional(env, msg);
         if (verdict && verdict.is_spam) {
             await archiveSpamToRubbish(env, msg, userId, verdict);
-            await notifyUserSpamDropped(env, userId);
+            await notifyUserSpamDropped(env, userId, msg, verdict);
             return;
         }
     } catch (_) {}
