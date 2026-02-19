@@ -1422,7 +1422,7 @@ async function classifySpamOptional(env, msg) {
 
   const finish = async (finalVerdict, detail = {}) => {
     const processingMs = Math.max(0, Date.now() - startedAt);
-    const usage = detail.aiUsage || finalVerdict?.usage || null;
+    const usage = detail.aiUsage || detail.aiVerdict?.usage || finalVerdict?.usage || null;
     const usageStats = await updateSpamUsageStats(env, usage);
     await archiveSpamJudgeLog(env, msg, finalVerdict, {
       text,
@@ -1497,7 +1497,7 @@ async function classifySpamOptional(env, msg) {
     const isSpam = ai.is_spam && ai.score >= (rules && rules.ai ? rules.ai.threshold : DEFAULT_SPAM_RULES.ai.threshold);
     return await finishAndCache(
       { is_spam: !!isSpam, score: ai.score, reason: ai.reason, ai_used: true },
-      { source: "ai_only", ruleVerdict, aiVerdict: ai }
+      { source: "ai_only", ruleVerdict, aiVerdict: ai, aiUsage: ai.usage || null }
     );
   }
 
