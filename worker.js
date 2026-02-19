@@ -696,7 +696,7 @@ function buildSpamVerdictCacheKey(msg, mergedText = "") {
   let hash = 2166136261;
   for (let i = 0; i < normalized.length; i++) {
     hash ^= normalized.charCodeAt(i);
-    hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+    hash = Math.imul(hash, 16777619) >>> 0;
   }
   const digest = (hash >>> 0).toString(16);
   return `spam_verdict:${chatId}:${userId}:${mediaSig || "none"}:${digest}`;
