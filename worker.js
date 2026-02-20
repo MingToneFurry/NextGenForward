@@ -1679,7 +1679,8 @@ function buildSpamUsageStatsFallback(usage = null) {
     totals: {
       messages_total: 0,
       input_tokens_total: 0,
-      output_tokens_total: 0
+      output_tokens_total: 0,
+      total_tokens_total: 0
     }
   };
 }
@@ -1695,11 +1696,13 @@ async function updateSpamUsageStats(env, usage = null) {
   const prevMessages = Math.max(0, Math.floor(Number(stats?.messages_total || 0)));
   const prevInput = Math.max(0, Math.floor(Number(stats?.input_tokens_total || 0)));
   const prevOutput = Math.max(0, Math.floor(Number(stats?.output_tokens_total || 0)));
+  const prevTotal = Math.max(0, Math.floor(Number(stats?.total_tokens_total || (prevInput + prevOutput))));
 
   const next = {
     messages_total: prevMessages + 1,
     input_tokens_total: prevInput + promptTokens,
     output_tokens_total: prevOutput + completionTokens,
+    total_tokens_total: prevTotal + currentTotal,
     updated_at: Date.now()
   };
 
@@ -1714,7 +1717,8 @@ async function updateSpamUsageStats(env, usage = null) {
     totals: {
       messages_total: next.messages_total,
       input_tokens_total: next.input_tokens_total,
-      output_tokens_total: next.output_tokens_total
+      output_tokens_total: next.output_tokens_total,
+      total_tokens_total: next.total_tokens_total
     }
   };
 }
@@ -1777,6 +1781,7 @@ function buildSpamJudgeLogMetaText(msg, finalVerdict, detail = {}) {
   const totalMessages = Math.max(0, Math.floor(Number(totalUsage.messages_total || 0)));
   const totalInputTokens = Math.max(0, Math.floor(Number(totalUsage.input_tokens_total || 0)));
   const totalOutputTokens = Math.max(0, Math.floor(Number(totalUsage.output_tokens_total || 0)));
+  const totalAllTokens = Math.max(0, Math.floor(Number(totalUsage.total_tokens_total || (totalInputTokens + totalOutputTokens))));
   const aiThreshold = Number(detail.aiThreshold);
   const threshold = Number.isFinite(aiThreshold)
     ? aiThreshold
@@ -1806,6 +1811,7 @@ function buildSpamJudgeLogMetaText(msg, finalVerdict, detail = {}) {
     `本次消息总消耗令牌: ${currentTotal}`,
     `已处理消息总数: ${totalMessages}`,
     `累计消耗令牌: ${totalInputTokens} 输入令牌, ${totalOutputTokens} 输出令牌`,
+    `全局总消耗令牌数: ${totalAllTokens}`,
     actionLine
   ];
   if (aiSignals) lines.push(`ai_signals: ${aiSignals}`);
