@@ -1444,11 +1444,32 @@ async function classifySpamOptional(env, msg) {
   const text = extractTextFromTelegramMessage(msg);
   const replyContextText = extractReplyContextText(msg);
   const mergedText = [text, replyContextText].filter(Boolean).join("\n");
+  const hasMeaningfulText = !!String(mergedText || "").trim();
+  const mediaGroupId = msg?.media_group_id ? String(msg.media_group_id) : "";
+  const mediaGroupVerdictKey = (mediaGroupId && msg?.chat?.id && msg?.from?.id)
+    ? `spam_verdict:mg:${msg.chat.id}:${msg.from.id}:${mediaGroupId}`
+    : "";
   const enabled = await getGlobalSpamFilterEnabled(env);
   const crossChannelInfo = detectCrossChannelReply(msg);
   const crossChannel = !!crossChannelInfo.isCrossChannel;
   const cacheKey = buildSpamVerdictCacheKey(msg, mergedText);
   const cacheTtl = getSpamVerdictCacheTtlSeconds(env);
+
+  const loadMediaGroupVerdict = async () => {
+    if (!mediaGroupVerdictKey) return null;
+    const cached = await cacheGetJSON(mediaGroupVerdictKey, null);
+    return (cached && cached.finalVerdict && typeof cached.finalVerdict === "object")
+      ? cached.finalVerdict
+      : null;
+  };
+
+  const saveMediaGroupVerdict = async (verdict) => {
+    if (!mediaGroupVerdictKey || !verdict || typeof verdict !== "object") return;
+    await cachePutJSON(mediaGroupVerdictKey, {
+      finalVerdict: verdict,
+      ts: Date.now()
+    }, Math.max(60, CONFIG.MEDIA_GROUP_EXPIRE_SECONDS));
+  };
 
   const finish = async (finalVerdict, detail = {}) => {
     const processingMs = Math.max(0, Date.now() - startedAt);
@@ -1500,6 +1521,21 @@ async function classifySpamOptional(env, msg) {
     );
   }
 
+  if (mediaGroupVerdictKey && !hasMeaningfulText) {
+    for (let i = 0; i < 4; i++) {
+      const groupVerdict = await loadMediaGroupVerdict();
+      if (groupVerdict) {
+        return await finish(groupVerdict, {
+          source: "media_group_cache_hit",
+          cacheHit: true,
+          cacheable: false,
+          cacheSource: "media_group"
+        });
+      }
+      await new Promise(r => setTimeout(r, 250));
+    }
+  }
+
   const cachedVerdict = await cacheGetJSON(cacheKey, null);
   if (cachedVerdict && cachedVerdict.finalVerdict && typeof cachedVerdict.finalVerdict === "object") {
     return await finish(cachedVerdict.finalVerdict, {
@@ -1515,15 +1551,19 @@ async function classifySpamOptional(env, msg) {
 
   // 规则优先：只要命中本地规则（放行或拦截），就不再调用 AI
   if (typeof ruleVerdict.reason === "string" && ruleVerdict.reason.startsWith("allow_")) {
+    const finalVerdict = { ...ruleVerdict, ai_used: false };
+    if (mediaGroupVerdictKey && hasMeaningfulText) await saveMediaGroupVerdict(finalVerdict);
     return await finishAndCache(
-      { ...ruleVerdict, ai_used: false },
+      finalVerdict,
       { source: "allow_rule", ruleVerdict, aiVerdict: null, aiThreshold: (rules && rules.ai ? rules.ai.threshold : DEFAULT_SPAM_RULES.ai.threshold) }
     );
   }
 
   if (ruleVerdict.is_spam) {
+    const finalVerdict = { ...ruleVerdict, ai_used: false };
+    if (mediaGroupVerdictKey && hasMeaningfulText) await saveMediaGroupVerdict(finalVerdict);
     return await finishAndCache(
-      { ...ruleVerdict, ai_used: false },
+      finalVerdict,
       { source: "rule_match", ruleVerdict, aiVerdict: null, aiThreshold: (rules && rules.ai ? rules.ai.threshold : DEFAULT_SPAM_RULES.ai.threshold) }
     );
   }
@@ -1533,8 +1573,10 @@ async function classifySpamOptional(env, msg) {
   if (ai && ai.parse_failed !== true && typeof ai.is_spam === "boolean") {
     // v1.6.0: 阈值统一为 0.65（sanitizeSpamRules 已固定），这里继续沿用 rules.ai.threshold 以保持一致
     const isSpam = ai.is_spam && ai.score >= (rules && rules.ai ? rules.ai.threshold : DEFAULT_SPAM_RULES.ai.threshold);
+    const finalVerdict = { is_spam: !!isSpam, score: ai.score, reason: ai.reason, ai_used: true };
+    if (mediaGroupVerdictKey && hasMeaningfulText) await saveMediaGroupVerdict(finalVerdict);
     return await finishAndCache(
-      { is_spam: !!isSpam, score: ai.score, reason: ai.reason, ai_used: true },
+      finalVerdict,
       { source: "ai_only", ruleVerdict, aiVerdict: ai, aiUsage: ai.usage || null, aiThreshold: (rules && rules.ai ? rules.ai.threshold : DEFAULT_SPAM_RULES.ai.threshold) }
     );
   }
