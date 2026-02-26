@@ -693,7 +693,7 @@ function extractReplyContextText(msg) {
 function buildSpamVerdictCacheKey(msg, mergedText = "") {
   const chatId = String(msg?.chat?.id || "0");
   const userId = String(msg?.from?.id || "0");
-  const mediaSig = [msg?.photo ? "p" : "", msg?.video ? "v" : "", msg?.document ? "d" : "", msg?.audio ? "a" : ""].join("");
+  const mediaSig = [msg?.photo ? "p" : "", msg?.video ? "v" : "", msg?.document ? "d" : "", msg?.audio ? "a" : "", msg?.sticker ? "s" : ""].join("");
   const mediaIdentity = extractSpamCacheMediaIdentity(msg);
   const normalized = String(mergedText || "").replace(/\s+/g, " ").trim().toLowerCase().slice(0, 2000);
   let hash = 2166136261;
@@ -721,6 +721,7 @@ function extractSpamCacheMediaIdentity(msg) {
   appendIdentity("v", msg.video);
   appendIdentity("d", msg.document);
   appendIdentity("a", msg.audio);
+  appendIdentity("s", msg.sticker);
 
   if (msg.media_group_id) {
     candidates.push(`g:${String(msg.media_group_id)}`);
@@ -961,7 +962,126 @@ function pickModerationImageFileId(msg) {
     if (mime.startsWith("image/")) return String(msg.document.file_id);
   }
 
+  if (msg.sticker && msg.sticker.file_id) {
+    const isAnimated = !!msg.sticker.is_animated;
+    const isVideo = !!msg.sticker.is_video;
+    if (!isAnimated && !isVideo) return String(msg.sticker.file_id);
+  }
+
   return null;
+}
+
+function extractModerationStickerMeta(msg) {
+  const st = msg && msg.sticker ? msg.sticker : null;
+  if (!st) {
+    return {
+      has_sticker: false,
+      sticker_set_name: "",
+      sticker_emoji: "",
+      sticker_file_name: "",
+      sticker_set_title: "",
+      sticker_set_description: "",
+      sticker_is_animated: false,
+      sticker_is_video: false
+    };
+  }
+
+  return {
+    has_sticker: true,
+    sticker_set_name: String(st.set_name || "").trim(),
+    sticker_emoji: String(st.emoji || "").trim(),
+    sticker_file_name: String(st.file_name || "").trim(),
+    sticker_set_title: "",
+    sticker_set_description: "",
+    sticker_is_animated: !!st.is_animated,
+    sticker_is_video: !!st.is_video
+  };
+}
+
+
+async function enrichStickerMetaForModeration(env, stickerMeta) {
+  const meta = { ...(stickerMeta || {}) };
+  if (!meta.has_sticker || !meta.sticker_set_name) return meta;
+
+  const cacheKey = `sticker_set:moderation:${meta.sticker_set_name}`;
+  try {
+    const cached = await kvGetJSON(env, cacheKey, null, { cacheTtl: CONFIG.KV_CRITICAL_CACHE_TTL });
+    if (cached && typeof cached === "object") {
+      meta.sticker_set_title = String(cached.title || "").trim().slice(0, 120);
+      meta.sticker_set_description = String(cached.description || "").trim().slice(0, 300);
+      return meta;
+    }
+  } catch (_) {}
+
+  try {
+    const setRes = await tgCall(env, "getStickerSet", { name: meta.sticker_set_name }, { timeout: 8000, maxRetries: 1 });
+    const set = (setRes && setRes.ok && setRes.result) ? setRes.result : null;
+    const title = String(set?.title || "").trim().slice(0, 120);
+    const description = title || String(meta.sticker_set_name || "").trim().slice(0, 300);
+    meta.sticker_set_title = title;
+    meta.sticker_set_description = description;
+    await kvPut(env, cacheKey, JSON.stringify({ title, description, fetched_at: Date.now() }), { expirationTtl: 7 * 24 * 3600 });
+  } catch (e) {
+    Logger.warn("get_sticker_set_moderation_meta_failed", {
+      stickerSetName: meta.sticker_set_name,
+      error: String((e && e.message) ? e.message : e)
+    });
+    meta.sticker_set_description = String(meta.sticker_set_name || "").trim().slice(0, 300);
+  }
+
+  return meta;
+}
+
+async function getUserModerationProfile(env, msg) {
+  const from = msg && msg.from ? msg.from : null;
+  const userId = from && from.id ? from.id : null;
+
+  const fallback = {
+    first_name: String(from?.first_name || "").trim(),
+    last_name: String(from?.last_name || "").trim(),
+    username: String(from?.username || "").trim(),
+    bio: ""
+  };
+
+  if (!userId) return fallback;
+
+  const key = `profile:moderation:${userId}`;
+  const cached = await kvGetJSON(env, key, null, { cacheTtl: CONFIG.KV_CRITICAL_CACHE_TTL });
+  const now = Date.now();
+  const maxAgeMs = 6 * 3600 * 1000;
+  if (cached && cached.fetched_at && (now - Number(cached.fetched_at) <= maxAgeMs)) {
+    return {
+      first_name: String(cached.first_name || fallback.first_name || "").trim(),
+      last_name: String(cached.last_name || fallback.last_name || "").trim(),
+      username: String(cached.username || fallback.username || "").trim(),
+      bio: String(cached.bio || "").trim().slice(0, 500)
+    };
+  }
+
+  try {
+    const chatRes = await tgCall(env, "getChat", { chat_id: userId }, { timeout: 8000, maxRetries: 1 });
+    const chat = (chatRes && chatRes.ok && chatRes.result) ? chatRes.result : null;
+    const profile = {
+      first_name: String(chat?.first_name || fallback.first_name || "").trim(),
+      last_name: String(chat?.last_name || fallback.last_name || "").trim(),
+      username: String(chat?.username || fallback.username || "").trim(),
+      bio: String(chat?.bio || "").trim().slice(0, 500),
+      fetched_at: now
+    };
+    await kvPut(env, key, JSON.stringify(profile), { expirationTtl: 7 * 24 * 3600 });
+    return {
+      first_name: profile.first_name,
+      last_name: profile.last_name,
+      username: profile.username,
+      bio: profile.bio
+    };
+  } catch (e) {
+    Logger.warn("get_user_moderation_profile_failed", {
+      userId,
+      error: String((e && e.message) ? e.message : e)
+    });
+    return fallback;
+  }
 }
 
 function arrayBufferToBase64(buf) {
@@ -1034,7 +1154,12 @@ async function aiSpamVerdict(env, msg, text, rules, crossChannelInfo = null, rep
   if (!grokCfg.ready) return null;
 
   const rawText = String(text || "").trim();
-  const imageDataUrl = await buildModerationImageDataUrl(env, msg);
+  const baseStickerMeta = extractModerationStickerMeta(msg);
+  const [imageDataUrl, profileMeta, stickerMeta] = await Promise.all([
+    buildModerationImageDataUrl(env, msg),
+    getUserModerationProfile(env, msg),
+    enrichStickerMetaForModeration(env, baseStickerMeta)
+  ]);
   const hasVisual = !!imageDataUrl;
   const t = rawText || "[NO_TEXT_CONTENT]";
 
@@ -1084,7 +1209,7 @@ JSON 必须是：
   "is_spam": boolean,
   "confidence": number,
   "category": string,
-  "signals": string[]
+  "signals": string[] // 必须至少 1 条，最多 12 条；即使判定为正常聊天，也必须给出“正常/未见风险”的分析信号
 }
 category 仅允许以下之一：
 ["广告推广","引流导购","诈骗诱导","黑灰产交易","正常聊天","可疑边缘"]
@@ -1115,14 +1240,22 @@ confidence 映射（严格遵守，谐音计入信号强度）：
       cross_channel_reply_type: resolvedCrossChannelInfo.replyType || "none",
       has_external_reply: !!(msg && msg.external_reply),
       has_forward_origin: !!(msg && msg.forward_origin),
-      sender_chat_is_channel: !!(msg && msg.sender_chat && msg.sender_chat.type === "channel")
+      sender_chat_is_channel: !!(msg && msg.sender_chat && msg.sender_chat.type === "channel"),
+      user_profile: {
+        first_name: String(profileMeta?.first_name || "").slice(0, 100),
+        last_name: String(profileMeta?.last_name || "").slice(0, 100),
+        username: String(profileMeta?.username || "").slice(0, 100),
+        display_name: `${String(profileMeta?.first_name || "").trim()} ${String(profileMeta?.last_name || "").trim()}`.trim().slice(0, 120),
+        bio: String(profileMeta?.bio || "").slice(0, 500)
+      }
     },
     media_hint: {
       has_photo: !!(msg && Array.isArray(msg.photo) && msg.photo.length),
       has_video: !!(msg && msg.video),
       has_document: !!(msg && msg.document),
       has_audio: !!(msg && msg.audio),
-      has_media_group: !!(msg && msg.media_group_id)
+      has_media_group: !!(msg && msg.media_group_id),
+      ...stickerMeta
     }
   };
 
@@ -1147,9 +1280,13 @@ confidence 映射（严格遵守，谐音计入信号强度）：
       ? categoryRaw
       : (isSpam ? "可疑边缘" : "正常聊天");
 
-    const signals = Array.isArray(obj.signals)
-      ? obj.signals.filter(x => typeof x === "string").map(x => x.trim()).filter(Boolean).slice(0, 12)
+    const signalsRaw = Array.isArray(obj.signals)
+      ? obj.signals.filter(x => typeof x === "string").map(x => x.trim()).filter(Boolean)
       : [];
+    const signals = signalsRaw.slice(0, 12);
+    if (!signals.length) {
+      signals.push(isSpam ? "检测到可疑广告/导流风险信号" : "未检测到广告导流或交易诱导意图");
+    }
 
     return {
       is_spam: !!isSpam,
@@ -1804,8 +1941,11 @@ function buildSpamJudgeLogMetaText(msg, finalVerdict, detail = {}) {
     msg?.photo ? "photo" : null,
     msg?.video ? "video" : null,
     msg?.document ? "document" : null,
-    msg?.audio ? "audio" : null
+    msg?.audio ? "audio" : null,
+    msg?.sticker ? "sticker" : null
   ].filter(Boolean);
+  const stickerSetName = String(msg?.sticker?.set_name || "").trim();
+  const stickerEmoji = String(msg?.sticker?.emoji || "").trim();
 
   const finalScoreText = Number.isFinite(finalScore) ? finalScore.toFixed(2) : "0.00";
   const source = String(detail.source || "unknown");
@@ -1847,6 +1987,7 @@ function buildSpamJudgeLogMetaText(msg, finalVerdict, detail = {}) {
     `rule: spam=${ruleIsSpam} score=${ruleScoreText} reason=${ruleReason}`,
     `ai: spam=${aiIsSpam} score=${aiScoreText} reason=${aiReason}`,
     `media: ${mediaFlags.length ? mediaFlags.join(",") : "none"}`,
+    `sticker: ${stickerSetName || stickerEmoji ? `${stickerSetName || "[no_set]"}${stickerEmoji ? ` emoji=${stickerEmoji}` : ""}` : "none"}`,
     `text: ${textPreview}`,
     `⏱️ 处理时间: ${processingSecText}秒`,
     `本次消耗令牌: ${currentPrompt} 输入, ${currentCompletion} 输出`,
@@ -1856,7 +1997,7 @@ function buildSpamJudgeLogMetaText(msg, finalVerdict, detail = {}) {
     `全局总消耗令牌数: ${totalAllTokens}`,
     actionLine
   ];
-  if (aiSignals) lines.push(`ai_signals: ${aiSignals}`);
+  lines.push(`ai_signals: ${aiSignals || "none"}`);
   return lines.join("\n");
 }
 
