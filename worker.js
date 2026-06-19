@@ -2073,21 +2073,50 @@ async function getRubbishRouteTargetUserId(env, threadId, messageId) {
 }
 
 async function getRubbishTopicThreadId(env) {
-  const rec = await kvGetJSON(env, RUBBISH_TOPIC_REC_KEY, null, {});
+  const rec = await getRubbishTopicRec(env);
   if (!rec || !rec.thread_id) return null;
   const tid = Number(rec.thread_id);
   return Number.isFinite(tid) && tid > 0 ? tid : null;
+}
+
+function readEnvPositiveInt(env, key) {
+  const raw = readEnvString(env, key, "");
+  if (!raw) return null;
+  const n = Math.floor(Number(raw));
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+async function getConfiguredTopicRec(env, kvKey, threadIdEnvKey, titleEnvKey, fallbackTitle) {
+  const rec = await kvGetJSON(env, kvKey, null, {});
+  if (rec && rec.thread_id) {
+    const tid = Number(rec.thread_id);
+    if (Number.isFinite(tid) && tid > 0) return { ...rec, thread_id: tid };
+  }
+
+  const configuredThreadId = readEnvPositiveInt(env, threadIdEnvKey);
+  if (!configuredThreadId) return null;
+
+  const title = readEnvString(env, titleEnvKey, fallbackTitle).slice(0, CONFIG.MAX_TITLE_LENGTH) || fallbackTitle;
+  const configured = {
+    thread_id: configuredThreadId,
+    title,
+    source: "env",
+    configured_at: Date.now()
+  };
+  await kvPut(env, kvKey, JSON.stringify(configured));
+  return configured;
+}
+
+async function getRubbishTopicRec(env) {
+  return await getConfiguredTopicRec(env, RUBBISH_TOPIC_REC_KEY, "RUBBISH_TOPIC_THREAD_ID", "RUBBISH_TOPIC_TITLE", "🗑️ rubbish");
 }
 
 async function ensureRubbishTopicRec(env, opts = {}) {
   const forceRecreate = !!(opts && opts.forceRecreate);
 
   if (!forceRecreate) {
-    const rec = await kvGetJSON(env, RUBBISH_TOPIC_REC_KEY, null, {});
-    if (rec && rec.thread_id) {
-      const tid = Number(rec.thread_id);
-      if (Number.isFinite(tid) && tid > 0) return { ...rec, thread_id: tid };
-    }
+    const rec = await getRubbishTopicRec(env);
+    if (rec && rec.thread_id) return rec;
   }
 
   const topicTitle = readEnvString(env, "RUBBISH_TOPIC_TITLE", "🗑️ rubbish").slice(0, CONFIG.MAX_TITLE_LENGTH) || "🗑️ rubbish";
@@ -2109,21 +2138,22 @@ async function ensureRubbishTopicRec(env, opts = {}) {
 }
 
 async function getLogTopicThreadId(env) {
-  const rec = await kvGetJSON(env, LOG_TOPIC_REC_KEY, null, {});
+  const rec = await getLogTopicRec(env);
   if (!rec || !rec.thread_id) return null;
   const tid = Number(rec.thread_id);
   return Number.isFinite(tid) && tid > 0 ? tid : null;
+}
+
+async function getLogTopicRec(env) {
+  return await getConfiguredTopicRec(env, LOG_TOPIC_REC_KEY, "LOG_TOPIC_THREAD_ID", "LOG_TOPIC_TITLE", "log");
 }
 
 async function ensureLogTopicRec(env, opts = {}) {
   const forceRecreate = !!(opts && opts.forceRecreate);
 
   if (!forceRecreate) {
-    const rec = await kvGetJSON(env, LOG_TOPIC_REC_KEY, null, {});
-    if (rec && rec.thread_id) {
-      const tid = Number(rec.thread_id);
-      if (Number.isFinite(tid) && tid > 0) return { ...rec, thread_id: tid };
-    }
+    const rec = await getLogTopicRec(env);
+    if (rec && rec.thread_id) return rec;
   }
 
   const topicTitle = readEnvString(env, "LOG_TOPIC_TITLE", "log").slice(0, CONFIG.MAX_TITLE_LENGTH) || "log";
@@ -4075,7 +4105,8 @@ async function probeForumThread(env, expectedThreadId, opts = {}) {
         const res = await tgCall(env, "sendMessage", {
             chat_id: env.SUPERGROUP_ID,
             message_thread_id: expectedThreadId,
-            text: " "
+            text: ".",
+            disable_notification: true
         });
 
         const actualThreadId = res.result?.message_thread_id;
@@ -4102,7 +4133,7 @@ async function probeForumThread(env, expectedThreadId, opts = {}) {
         }
 
         if (actualThreadId === undefined || actualThreadId === null) {
-            return { status: "missing_thread_id" };
+            return { status: "ok", threadIdOmitted: true };
         }
 
         if (Number(actualThreadId) !== Number(expectedThreadId)) {
@@ -8529,8 +8560,8 @@ let rawPrompt = (msg.text || "").replace(/\u200b/g, "").trim();
                          `/blacklist 查看黑名单\n` +
                          `/info 查看当前用户信息\n` +
                          `/settings 打开设置面板\n` +
-                         `/rubbish 查看垃圾箱话题状态，或 /rubbish recreate 重建\n` +
-                         `/log 查看日志话题状态，或 /log recreate 重建\n` +
+                         `/rubbish 查看垃圾箱话题状态，/rubbish recreate 重建，/rubbish bind 绑定当前话题\n` +
+                         `/log 查看日志话题状态，/log recreate 重建，/log bind 绑定当前话题\n` +
                          `/clean ⚠️ 危险操作：删除当前话题用户的所有数据，将会删除该用户话题，清空该用户的聊天记录，并重置他的人机验证，但不会改变该用户的封禁状态或白名单状态`;
 
         await tgCall(env, "sendMessage", withMessageThreadId({
@@ -8590,6 +8621,46 @@ if (command === "rubbish") {
             return;
         }
 
+        const actionRaw = String(args || "").trim();
+        const action = actionRaw.toLowerCase();
+        const bindMatch = actionRaw.match(/^(?:bind|绑定)(?:\s+(\d+))?$/i);
+        if (bindMatch) {
+            const targetThreadId = Number(bindMatch[1] || ((threadId && threadId !== 1) ? threadId : 0));
+            if (!Number.isFinite(targetThreadId) || targetThreadId <= 0) {
+                await tgCall(env, "sendMessage", withMessageThreadId({
+                    chat_id: env.SUPERGROUP_ID,
+                    message_thread_id: threadId,
+                    text: "❌ 无法绑定垃圾箱话题。\n\n请在目标 rubbish 话题内发送 `/rubbish bind`，或在 General 发送 `/rubbish bind <thread_id>`。",
+                    parse_mode: "Markdown",
+                    disable_notification: true
+                }, threadId));
+                return;
+            }
+
+            const title = readEnvString(env, "RUBBISH_TOPIC_TITLE", "🗑️ rubbish").slice(0, CONFIG.MAX_TITLE_LENGTH) || "🗑️ rubbish";
+            const rec = {
+                thread_id: targetThreadId,
+                title,
+                source: "manual_bind",
+                bound_by: adminId,
+                bound_at: Date.now()
+            };
+            await kvPut(env, RUBBISH_TOPIC_REC_KEY, JSON.stringify(rec));
+            const probe = await probeForumThread(env, targetThreadId, { reason: "rubbish_bind", doubleCheckOnMissingThreadId: false });
+            const statusText = (probe?.status === "ok") ? "✅ 正常" : `⚠️ 需确认 (${probe?.status || "unknown"})`;
+            await tgCall(env, "sendMessage", withMessageThreadId({
+                chat_id: env.SUPERGROUP_ID,
+                text:
+`✅ 已绑定垃圾箱话题
+
+话题ID：${targetThreadId}
+话题名称：${title}
+探测状态：${statusText}`,
+                disable_notification: true
+            }, null));
+            return;
+        }
+
         // 仅允许在 General 话题中使用
         if (threadId && threadId !== 1) {
             await tgCall(env, "sendMessage", withMessageThreadId({
@@ -8601,7 +8672,6 @@ if (command === "rubbish") {
             return;
         }
 
-        const action = String(args || "").trim().toLowerCase();
         const shouldRecreate = /^(recreate|reset|new|重建|重置)$/.test(action);
 
         if (shouldRecreate) {
@@ -8623,7 +8693,7 @@ if (command === "rubbish") {
             return;
         }
 
-        const rec = await kvGetJSON(env, RUBBISH_TOPIC_REC_KEY, null, {});
+        const rec = await getRubbishTopicRec(env);
         const threadIdNum = Number(rec?.thread_id || 0);
         if (!Number.isFinite(threadIdNum) || threadIdNum <= 0) {
             await tgCall(env, "sendMessage", withMessageThreadId({
@@ -8667,6 +8737,46 @@ if (command === "log") {
             return;
         }
 
+        const actionRaw = String(args || "").trim();
+        const action = actionRaw.toLowerCase();
+        const bindMatch = actionRaw.match(/^(?:bind|绑定)(?:\s+(\d+))?$/i);
+        if (bindMatch) {
+            const targetThreadId = Number(bindMatch[1] || ((threadId && threadId !== 1) ? threadId : 0));
+            if (!Number.isFinite(targetThreadId) || targetThreadId <= 0) {
+                await tgCall(env, "sendMessage", withMessageThreadId({
+                    chat_id: env.SUPERGROUP_ID,
+                    message_thread_id: threadId,
+                    text: "❌ Cannot bind log topic.\n\nSend `/log bind` inside the target log topic, or send `/log bind <thread_id>` in General.",
+                    parse_mode: "Markdown",
+                    disable_notification: true
+                }, threadId));
+                return;
+            }
+
+            const title = readEnvString(env, "LOG_TOPIC_TITLE", "log").slice(0, CONFIG.MAX_TITLE_LENGTH) || "log";
+            const rec = {
+                thread_id: targetThreadId,
+                title,
+                source: "manual_bind",
+                bound_by: adminId,
+                bound_at: Date.now()
+            };
+            await kvPut(env, LOG_TOPIC_REC_KEY, JSON.stringify(rec));
+            const probe = await probeForumThread(env, targetThreadId, { reason: "log_bind", doubleCheckOnMissingThreadId: false });
+            const statusText = (probe?.status === "ok") ? "ok" : `needs check (${probe?.status || "unknown"})`;
+            await tgCall(env, "sendMessage", withMessageThreadId({
+                chat_id: env.SUPERGROUP_ID,
+                text:
+`Log topic bound
+
+thread id: ${targetThreadId}
+title: ${title}
+probe status: ${statusText}`,
+                disable_notification: true
+            }, null));
+            return;
+        }
+
         if (threadId && threadId !== 1) {
             await tgCall(env, "sendMessage", withMessageThreadId({
                 chat_id: env.SUPERGROUP_ID,
@@ -8677,7 +8787,6 @@ if (command === "log") {
             return;
         }
 
-        const action = String(args || "").trim().toLowerCase();
         const shouldRecreate = /^(recreate|reset|new|重建|重置)$/.test(action);
 
         if (shouldRecreate) {
@@ -8699,7 +8808,7 @@ All judgement logs will be sent silently to this topic.`,
             return;
         }
 
-        const rec = await kvGetJSON(env, LOG_TOPIC_REC_KEY, null, {});
+        const rec = await getLogTopicRec(env);
         const threadIdNum = Number(rec?.thread_id || 0);
         if (!Number.isFinite(threadIdNum) || threadIdNum <= 0) {
             await tgCall(env, "sendMessage", withMessageThreadId({

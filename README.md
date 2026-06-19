@@ -141,7 +141,9 @@ powershell -ExecutionPolicy Bypass -File scripts/deploy-with-env.ps1 -Deploy
 | `ADMIN_IDS` | `123456789,987654321` | 指定可执行管理操作的管理员白名单（逗号分隔） |
 | `VERIFIED_TTL_SECONDS` | `86400` | 验证通过状态 TTL；不填或 `<=0` 表示不过期 |
 | `RUBBISH_TOPIC_TITLE` | `rubbish` | 垃圾箱话题名称（用于命中垃圾后的集中存档） |
+| `RUBBISH_TOPIC_THREAD_ID` | `123` | 可选，手动绑定已有垃圾箱话题 ID；也可在目标话题内发送 `/rubbish bind` |
 | `LOG_TOPIC_TITLE` | `log` | 判断日志话题名称（用于保存每条消息的垃圾判断详情） |
+| `LOG_TOPIC_THREAD_ID` | `456` | 可选，手动绑定已有日志话题 ID；也可在目标话题内发送 `/log bind` |
 | `SPAM_VERDICT_CACHE_TTL_SECONDS` | `2592000` | 垃圾判定缓存 TTL（秒）；建议 30 天（一个月） |
 
 Turnstile 相关可选变量：
