@@ -386,7 +386,7 @@ async function setGlobalVerifyMode(env, mode) {
 // 默认垃圾规则（可在 /settings 中编辑）
 const DEFAULT_SPAM_RULES = {
   version: 1,
-  // 默认拦截规则清空：仅依赖高风险硬规则 + AI 判定（管理员可在 /settings 中再配置）
+  // 默认拦截规则清空：依赖高风险硬规则 + 默认广告词库评分 + 可选 AI 判定（管理员可在 /settings 中再配置）
   max_links: 0,
   keywords: [],
   regexes: [],
@@ -397,6 +397,86 @@ const DEFAULT_SPAM_RULES = {
     // v1.6.1: AI 阈值默认更激进（更愿意拦截）
     threshold: 0.65
   }
+};
+
+// 默认广告词库：参考 GitHub 中文广告/敏感词库后做小型内置集合，运行时按来源合并去重。
+// Sources:
+// - jkiss/sensitive-words: 广告.txt
+// - finscn/sensitive-words: 广告.txt
+// - Telegram 场景补充：账号交易、接码、跑分、盗U、群/频道导流等常见变体。
+const DEFAULT_AD_LEXICON_SOURCES = {
+  jkiss_ad: [
+    "兼职", "招聘", "有意者", "到货", "本店", "代购", "扣扣", "客服", "微店", "淘宝",
+    "网购", "网络工作", "代理", "专业代理", "帮忙点一下", "帮忙点下", "请点击进入",
+    "详情请进入", "私人侦探", "私家侦探", "信用卡提现", "无抵押贷款", "广告代理",
+    "代开发票", "销售热线", "免费订购热线", "低价出售", "款到发货", "回复可见",
+    "连锁加盟", "加盟连锁", "免费二级域名", "免费使用", "免费索取", "刻章办"
+  ],
+  finscn_ad: [
+    "微信", "WX", "飞机", "发票", "发廊", "敲背", "全职", "网络", "QQ", "兼值",
+    "代理", "客服", "兼职", "招聘", "微店", "淘宝", "本店", "到货", "代购"
+  ],
+  telegram_ad: [
+    "加群", "进群", "拉群", "频道", "通知群", "福利群", "资源群", "推广", "引流",
+    "私聊", "私信", "联系我", "联系客服", "咨询客服", "下单", "购买", "出售",
+    "售卖", "补货", "自助取号", "接码", "实卡", "卡商", "号商", "飞机号", "tg号",
+    "会员号", "新号", "老号", "二次号", "账号批发", "价格透明", "秒杀", "爆款",
+    "返利", "红包", "日结", "佣金", "刷单", "高收益", "稳赚", "搬砖", "开户链接",
+    "邀请码"
+  ],
+  illicit_ad: [
+    "跑分", "洗钱", "过红", "盗u", "盗U", "盗币", "黑五类", "黑产", "灰产",
+    "破解星链", "免实名", "实名卡", "养号", "批量注册", "代实名", "代认证",
+    "虚拟币套利", "盘口", "博彩", "棋牌", "成人", "楼凤", "包夜", "桑拿", "上门",
+    "假药", "壮阳", "减肥药"
+  ]
+};
+
+function normalizeLexiconToken(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .replace(/\u200b/g, "")
+    .trim()
+    .toLowerCase();
+}
+
+function compactLexiconText(value) {
+  return normalizeLexiconToken(value)
+    .replace(/[\s`~!@#$%^&*()\-_=+\[\]{}\\|;:'",.<>/?，。、“”‘’；：！？【】（）《》￥…—·]+/g, "");
+}
+
+function uniqueLexiconTerms(...sources) {
+  const set = new Set();
+  for (const source of sources) {
+    for (const item of (source || [])) {
+      const token = normalizeLexiconToken(item);
+      if (!token || token.length > 32) continue;
+      set.add(token);
+    }
+  }
+  return Array.from(set).sort((a, b) => b.length - a.length || a.localeCompare(b));
+}
+
+const DEFAULT_AD_LEXICON = {
+  ad: uniqueLexiconTerms(
+    DEFAULT_AD_LEXICON_SOURCES.jkiss_ad,
+    DEFAULT_AD_LEXICON_SOURCES.finscn_ad,
+    DEFAULT_AD_LEXICON_SOURCES.telegram_ad
+  ),
+  contact: uniqueLexiconTerms([
+    "qq", "扣扣", "微信", "vx", "wx", "v信", "薇信", "tg", "telegram", "电报", "飞机",
+    "t.me", "私聊", "私信", "联系", "联系客服", "咨询", "加群", "进群", "频道", "扫码",
+    "二维码", "客服", "群主", "机器人", "bot"
+  ]),
+  action: uniqueLexiconTerms([
+    "购买", "下单", "出售", "售卖", "低价出售", "免费领取", "领取", "补货", "发货",
+    "推广", "引流", "招商", "加盟", "代理", "招代理", "合作", "返利", "红包", "秒杀",
+    "爆款", "优惠", "折扣", "日结", "佣金", "兼职", "招聘", "刷单", "高收益", "稳赚"
+  ]),
+  illicit: uniqueLexiconTerms(DEFAULT_AD_LEXICON_SOURCES.illicit_ad, [
+    "接码", "卡商", "号商", "飞机号", "tg号", "账号批发", "免实名", "代实名", "跑分",
+    "洗钱", "盗u", "盗币", "盘口", "博彩", "楼凤", "假药", "壮阳"
+  ])
 };
 
 async function getGlobalSpamFilterEnabled(env) {
@@ -474,6 +554,13 @@ async function setGlobalSpamFilterRules(env, rulesObj) {
   return safe;
 }
 
+async function setGlobalSpamAiEnabled(env, enabled) {
+  const rules = await getGlobalSpamFilterRules(env);
+  rules.ai = rules.ai && typeof rules.ai === "object" ? rules.ai : { ...DEFAULT_SPAM_RULES.ai };
+  rules.ai.enabled = !!enabled;
+  return await setGlobalSpamFilterRules(env, rules);
+}
+
 
 // --- 垃圾规则“提示词”编辑（v1.1.1b）---
 // 说明：为了降低上手难度，管理员可在 /settings 里用“提示词”方式编辑规则。
@@ -544,6 +631,7 @@ function mergeUnique(arr, add) {
  * - allow: 你好,谢谢
  * - block_re: /二维码|扫码/i
  * - allow_re: /回执/i
+ * - ai=off / ai=on
  * - 其他不带前缀的行：按关键词列表处理（用逗号/顿号分隔）
  * - 写一行 “清空默认”/“CLEAR_DEFAULTS”：表示不使用默认规则（仅使用提示词解析出的规则）
  */
@@ -595,6 +683,15 @@ function promptToSpamRules(promptText, baseRules) {
       continue;
     }
 
+    // AI/Grok 审查开关
+    const aiSwitch = line.match(/^(?:ai|grok|ai_review|ai审查|grok审核)\s*[:=]\s*(on|off|true|false|1|0|开启|关闭|启用|禁用)$/i);
+    if (aiSwitch) {
+      const v = String(aiSwitch[1] || "").toLowerCase();
+      rules.ai = rules.ai && typeof rules.ai === "object" ? rules.ai : { ...DEFAULT_SPAM_RULES.ai };
+      rules.ai.enabled = (v === "on" || v === "true" || v === "1" || v === "开启" || v === "启用");
+      continue;
+    }
+
     // allow keywords
     if (low.startsWith("allow:") || low.startsWith("允许:") || low.startsWith("放行:")) {
       const rest = line.split(/[:：]/).slice(1).join(":").trim();
@@ -640,6 +737,7 @@ function rulesToFriendlyPrompt(rules) {
   lines.push(`📝 当前规则内容：`);
   lines.push(``);
   lines.push(`max_links=${r.max_links}`);
+  lines.push(`ai=${r.ai && r.ai.enabled ? "on" : "off"}`);
   if ((r.keywords || []).length) lines.push(`block: ${(r.keywords || []).slice(0, 30).join("、")}`);
   if ((r.allow_keywords || []).length) lines.push(`allow: ${(r.allow_keywords || []).slice(0, 30).join("、")}`);
   if ((r.regexes || []).length) lines.push(`block_re: ${(r.regexes || []).slice(0, 10).join(", ")}`);
@@ -688,6 +786,174 @@ function extractReplyContextText(msg) {
 
   if (!candidates.length) return "";
   return candidates.join("\n").slice(0, 2000);
+}
+
+function buildSpamTextBundle(text, replyContextText = "", profileMeta = null) {
+  const firstName = String(profileMeta?.first_name || "").trim();
+  const lastName = String(profileMeta?.last_name || "").trim();
+  const username = String(profileMeta?.username || "").trim();
+  const displayName = `${firstName} ${lastName}`.trim();
+  const bio = String(profileMeta?.bio || "").trim();
+
+  const fields = [
+    { name: "message", text: String(text || "").trim(), weight: 1.0, primary: true },
+    { name: "reply", text: String(replyContextText || "").trim(), weight: 0.38, primary: false },
+    { name: "username", text: username, weight: 0.55, primary: false },
+    { name: "display_name", text: displayName, weight: 0.45, primary: false },
+    { name: "bio", text: bio, weight: 0.65, primary: false }
+  ].filter(f => f.text);
+
+  const mergedText = fields.map(f => f.text).join("\n").slice(0, 5000);
+  const primaryText = String(text || "").trim();
+  const profileText = [username, displayName, bio].filter(Boolean).join("\n").slice(0, 2000);
+
+  return {
+    fields,
+    mergedText,
+    primaryText,
+    profileText,
+    hasPrimaryText: !!primaryText,
+    hasProfileText: !!profileText
+  };
+}
+
+function findLexiconHits(text, terms, limit = 8) {
+  const normal = normalizeLexiconToken(text);
+  const compact = compactLexiconText(text);
+  const hits = [];
+  for (const term of (terms || [])) {
+    const token = normalizeLexiconToken(term);
+    if (!token) continue;
+    const compactToken = compactLexiconText(token);
+    if (!compactToken) continue;
+    if (normal.includes(token) || compact.includes(compactToken)) {
+      hits.push(token);
+      if (hits.length >= limit) break;
+    }
+  }
+  return hits;
+}
+
+function countRegexMatches(text, regex) {
+  const s = String(text || "");
+  const matches = s.match(regex);
+  return matches ? matches.length : 0;
+}
+
+function analyzeAdLexiconField(field) {
+  const text = String(field?.text || "");
+  const hits = {
+    ad: findLexiconHits(text, DEFAULT_AD_LEXICON.ad, 8),
+    contact: findLexiconHits(text, DEFAULT_AD_LEXICON.contact, 8),
+    action: findLexiconHits(text, DEFAULT_AD_LEXICON.action, 8),
+    illicit: findLexiconHits(text, DEFAULT_AD_LEXICON.illicit, 8)
+  };
+
+  const urlCount = countUrls(text);
+  const handleCount = countRegexMatches(text, /@\w{4,}(?:_bot)?\b/gi);
+  const phoneCount = countRegexMatches(text, /(?:\+?86[-\s]?)?1[3-9]\d[\s-]?\d{4}[\s-]?\d{4}\b/g);
+  const qqCount = countRegexMatches(text, /\b[1-9]\d{5,11}\b/g);
+  const qrHint = /(二维码|扫码|扫\s*码|qrcode|qr\s*code)/i.test(text);
+  const moneyHint = /(￥|¥|\$|u\b|usdt|元|块|价格|报价|付款|收款|担保|押金)/i.test(text);
+  const fieldWeight = Math.max(0.1, Number(field?.weight || 1));
+
+  let score = 0;
+  score += Math.min(0.45, hits.illicit.length * 0.26) * fieldWeight;
+  score += Math.min(0.36, hits.ad.length * 0.13) * fieldWeight;
+  score += Math.min(0.34, hits.contact.length * 0.15) * fieldWeight;
+  score += Math.min(0.36, hits.action.length * 0.14) * fieldWeight;
+  score += Math.min(0.24, urlCount * 0.12) * fieldWeight;
+  score += Math.min(0.22, handleCount * 0.11) * fieldWeight;
+  score += Math.min(0.18, phoneCount * 0.09) * fieldWeight;
+  score += Math.min(0.16, qqCount * 0.06) * fieldWeight;
+  if (qrHint) score += 0.12 * fieldWeight;
+  if (moneyHint) score += 0.08 * fieldWeight;
+
+  const hasContact = hits.contact.length > 0 || urlCount > 0 || handleCount > 0 || phoneCount > 0 || qqCount > 0 || qrHint;
+  const hasAction = hits.action.length > 0;
+  const hasAd = hits.ad.length > 0;
+  const hasIllicit = hits.illicit.length > 0;
+
+  if (hasContact && hasAction) score += 0.22 * fieldWeight;
+  if (hasContact && hasAd) score += 0.18 * fieldWeight;
+  if (hasAction && hasAd) score += 0.16 * fieldWeight;
+  if (hasIllicit && hasContact) score += 0.28 * fieldWeight;
+  if (hasIllicit && (hasAction || moneyHint)) score += 0.24 * fieldWeight;
+
+  return {
+    field: field?.name || "unknown",
+    score,
+    hits,
+    counts: { urlCount, handleCount, phoneCount, qqCount },
+    flags: { qrHint, moneyHint, hasContact, hasAction, hasAd, hasIllicit }
+  };
+}
+
+function defaultAdLexiconVerdict(bundle) {
+  const b = bundle && typeof bundle === "object"
+    ? bundle
+    : buildSpamTextBundle(String(bundle || ""));
+  if (!b.fields || !b.fields.length) return null;
+
+  const analyses = b.fields.map(analyzeAdLexiconField);
+  const primary = analyses.find(a => a.field === "message") || null;
+  const profileAnalyses = analyses.filter(a => a.field !== "message" && a.field !== "reply");
+
+  let score = analyses.reduce((sum, a) => sum + a.score, 0);
+  const anyPrimaryRisk = !!(primary && primary.score >= 0.18);
+  const anyProfileRisk = profileAnalyses.some(a => a.score >= 0.18);
+  const primaryIllicit = !!(primary && primary.flags.hasIllicit);
+  const primaryContact = !!(primary && primary.flags.hasContact);
+  const primaryAction = !!(primary && primary.flags.hasAction);
+  const primaryAd = !!(primary && primary.flags.hasAd);
+  const profileContactOrAction = profileAnalyses.some(a => a.flags.hasContact || a.flags.hasAction);
+  const profileIllicit = profileAnalyses.some(a => a.flags.hasIllicit);
+
+  if (anyPrimaryRisk && anyProfileRisk) score += 0.14;
+  if (primaryContact && profileContactOrAction) score += 0.10;
+  if (primaryIllicit && (primaryContact || primaryAction || profileContactOrAction)) score += 0.22;
+  if (profileIllicit && (anyPrimaryRisk || profileContactOrAction)) score += 0.12;
+
+  const urlCount = countUrls(b.primaryText || b.mergedText);
+  if (urlCount >= 2 && (primaryAd || primaryAction || primaryContact)) score += 0.12;
+
+  const cappedScore = Math.max(0, Math.min(0.99, score));
+  const allHits = [];
+  for (const a of analyses) {
+    for (const [kind, values] of Object.entries(a.hits || {})) {
+      for (const value of values || []) {
+        allHits.push(`${a.field}:${kind}:${value}`);
+      }
+    }
+    if (a.counts.urlCount) allHits.push(`${a.field}:url:${a.counts.urlCount}`);
+    if (a.counts.handleCount) allHits.push(`${a.field}:handle:${a.counts.handleCount}`);
+    if (a.counts.phoneCount) allHits.push(`${a.field}:phone:${a.counts.phoneCount}`);
+    if (a.flags.qrHint) allHits.push(`${a.field}:qr`);
+  }
+
+  const uniqueSignals = Array.from(new Set(allHits)).slice(0, 12);
+  const strongCombo = (primaryIllicit && (primaryContact || primaryAction)) ||
+    (primaryContact && primaryAction && (primaryAd || primaryIllicit)) ||
+    (anyPrimaryRisk && anyProfileRisk && cappedScore >= 0.78);
+  const profileOnly = !anyPrimaryRisk && anyProfileRisk;
+  const threshold = profileOnly ? 0.92 : 0.82;
+  const isSpam = cappedScore >= threshold || strongCombo;
+
+  if (!isSpam) {
+    return {
+      is_spam: false,
+      score: cappedScore,
+      reason: uniqueSignals.length ? "lexicon:below_threshold" : "lexicon:no_match",
+      signals: uniqueSignals
+    };
+  }
+
+  return {
+    is_spam: true,
+    score: Math.max(cappedScore, strongCombo ? 0.90 : threshold),
+    reason: "lexicon:weighted_ad",
+    signals: uniqueSignals
+  };
 }
 
 function buildSpamVerdictCacheKey(msg, mergedText = "") {
@@ -897,8 +1163,11 @@ function safeRegexTest(patternOrToken, text) {
   }
 }
 
-function ruleBasedSpamVerdict(text, rules) {
-  const t = (text || "").trim();
+function ruleBasedSpamVerdict(input, rules) {
+  const bundle = (input && typeof input === "object" && Array.isArray(input.fields))
+    ? input
+    : buildSpamTextBundle(String(input || ""));
+  const t = String(bundle.mergedText || "").trim();
   if (!t) return { is_spam: false, score: 0.0, reason: "empty" };
 
   // allowlist 先过：一旦命中 allow，就直接放行
@@ -913,12 +1182,18 @@ function ruleBasedSpamVerdict(text, rules) {
     }
   }
 
-  const highRisk = highRiskSpamVerdict(t);
+  const highRiskText = [bundle.primaryText, bundle.profileText].filter(Boolean).join("\n");
+  const highRisk = highRiskSpamVerdict(highRiskText || t);
   if (highRisk && highRisk.is_spam) {
     return highRisk;
   }
 
-  const urlCount = countUrls(t);
+  const lexiconVerdict = defaultAdLexiconVerdict(bundle);
+  if (lexiconVerdict && lexiconVerdict.is_spam) {
+    return lexiconVerdict;
+  }
+
+  const urlCount = countUrls(bundle.primaryText || t);
   if (rules.max_links > 0 && urlCount >= rules.max_links) {
     return { is_spam: true, score: 0.9, reason: `rule:max_links:${urlCount}` };
   }
@@ -933,6 +1208,10 @@ function ruleBasedSpamVerdict(text, rules) {
     if (pat && safeRegexTest(pat, t)) {
       return { is_spam: true, score: 0.75, reason: `rule:regex:${pat}` };
     }
+  }
+
+  if (lexiconVerdict && lexiconVerdict.signals && lexiconVerdict.signals.length) {
+    return { ...lexiconVerdict, is_spam: false, reason: "rule:no_match" };
   }
 
   return { is_spam: false, score: 0.0, reason: "rule:no_match" };
@@ -1576,8 +1855,9 @@ confidence 映射（严格遵守，谐音计入信号强度）：
   return null;
 }
 
-async function classifySpamOptional(env, msg) {
+async function classifySpamOptional(env, msg, opts = {}) {
   const startedAt = Date.now();
+  const allowAi = !(opts && opts.allowAi === false);
   const text = extractTextFromTelegramMessage(msg);
   const replyContextText = extractReplyContextText(msg);
   const mergedText = [text, replyContextText].filter(Boolean).join("\n");
@@ -1589,7 +1869,7 @@ async function classifySpamOptional(env, msg) {
   const enabled = await getGlobalSpamFilterEnabled(env);
   const crossChannelInfo = detectCrossChannelReply(msg);
   const crossChannel = !!crossChannelInfo.isCrossChannel;
-  const cacheKey = buildSpamVerdictCacheKey(msg, mergedText);
+  let cacheKey = "";
   const cacheTtl = getSpamVerdictCacheTtlSeconds(env);
 
   const loadMediaGroupVerdict = async () => {
@@ -1673,18 +1953,24 @@ async function classifySpamOptional(env, msg) {
     }
   }
 
-  const cachedVerdict = await cacheGetJSON(cacheKey, null);
-  if (cachedVerdict && cachedVerdict.finalVerdict && typeof cachedVerdict.finalVerdict === "object") {
-    return await finish(cachedVerdict.finalVerdict, {
-      source: "cache_hit",
-      cacheHit: true,
-      cacheable: false,
-      cacheSource: String(cachedVerdict.source || "unknown")
-    });
+  const rules = await getGlobalSpamFilterRules(env);
+  const profileMeta = await getUserModerationProfile(env, msg);
+  const spamBundle = buildSpamTextBundle(text, replyContextText, profileMeta);
+  cacheKey = allowAi ? buildSpamVerdictCacheKey(msg, spamBundle.mergedText) : "";
+  if (cacheKey) {
+    const cachedVerdict = await cacheGetJSON(cacheKey, null);
+    if (cachedVerdict && cachedVerdict.finalVerdict && typeof cachedVerdict.finalVerdict === "object") {
+      return await finish(cachedVerdict.finalVerdict, {
+        source: "cache_hit",
+        cacheHit: true,
+        cacheable: false,
+        cacheSource: String(cachedVerdict.source || "unknown")
+      });
+    }
   }
 
-  const rules = await getGlobalSpamFilterRules(env);
-  const ruleVerdict = ruleBasedSpamVerdict(mergedText, rules);
+  const ruleVerdict = ruleBasedSpamVerdict(spamBundle, rules);
+  const aiEnabled = !!(allowAi && rules && rules.ai && rules.ai.enabled);
 
   // 规则优先：只要命中本地规则（放行或拦截），就不再调用 AI
   if (typeof ruleVerdict.reason === "string" && ruleVerdict.reason.startsWith("allow_")) {
@@ -1702,6 +1988,20 @@ async function classifySpamOptional(env, msg) {
     return await finishAndCache(
       finalVerdict,
       { source: "rule_match", ruleVerdict, aiVerdict: null, aiThreshold: (rules && rules.ai ? rules.ai.threshold : DEFAULT_SPAM_RULES.ai.threshold) }
+    );
+  }
+
+  if (!aiEnabled) {
+    const reason = allowAi ? "ai_disabled" : "ai_skipped_unverified";
+    return await finishAndCache(
+      { is_spam: false, score: 0.0, reason, ai_used: false },
+      {
+        source: reason,
+        cacheable: false,
+        ruleVerdict,
+        aiVerdict: null,
+        aiThreshold: (rules && rules.ai ? rules.ai.threshold : DEFAULT_SPAM_RULES.ai.threshold)
+      }
     );
   }
 
@@ -1926,6 +2226,9 @@ function buildSpamJudgeLogMetaText(msg, finalVerdict, detail = {}) {
   const ruleScore = Number(ruleVerdict?.score);
   const ruleScoreText = Number.isFinite(ruleScore) ? ruleScore.toFixed(2) : "0.00";
   const ruleIsSpam = !!ruleVerdict?.is_spam;
+  const ruleSignals = Array.isArray(ruleVerdict?.signals)
+    ? ruleVerdict.signals.filter(x => typeof x === "string").slice(0, 12).join(" | ")
+    : "";
 
   const aiVerdict = detail.aiVerdict || null;
   const aiReason = String(aiVerdict?.reason || "none");
@@ -1985,6 +2288,7 @@ function buildSpamJudgeLogMetaText(msg, finalVerdict, detail = {}) {
     `cache_hit: ${cacheHit}`,
     `final: spam=${finalIsSpam} score=${finalScoreText} reason=${finalReason} ai_used=${aiUsed}`,
     `rule: spam=${ruleIsSpam} score=${ruleScoreText} reason=${ruleReason}`,
+    `rule_signals: ${ruleSignals || "none"}`,
     `ai: spam=${aiIsSpam} score=${aiScoreText} reason=${aiReason}`,
     `media: ${mediaFlags.length ? mediaFlags.join(",") : "none"}`,
     `sticker: ${stickerSetName || stickerEmoji ? `${stickerSetName || "[no_set]"}${stickerEmoji ? ` emoji=${stickerEmoji}` : ""}` : "none"}`,
@@ -4611,15 +4915,19 @@ async function buildSettingsPanel(env, adminId, botEnabled, opts = {}) {
     const verifyMode = await getGlobalVerifyMode(env);
     const verifyModeText = getVerifyModeText(verifyMode);
     const spamEnabled = await getGlobalSpamFilterEnabled(env);
+    const spamRules = await getGlobalSpamFilterRules(env);
     const spamText = spamEnabled ? "✅ 已开启" : "⛔ 已关闭";
-    const aiText = hasGrokModerationConfig(env) ? "✅ 可用" : "⛔ 未配置";
+    const aiEnabled = !!(spamRules && spamRules.ai && spamRules.ai.enabled);
+    const aiText = aiEnabled
+        ? (hasGrokModerationConfig(env) ? "✅ 已开启（可用）" : "⚠️ 已开启（未配置）")
+        : "⛔ 已关闭";
     const tsReady = hasTurnstileBinding(env);
     const tsText = tsReady ? "✅ 已配置" : "⛔ 未配置";
     let panelText = `⚙️ **设置面板**
 
 机器人总开关：${statusText}
 垃圾消息拦截：${spamText}
-Grok 审核：${aiText}
+AI 审查：${aiText}
 Turnstile：${tsText}
 验证方式：${verifyModeText}
 
@@ -4656,6 +4964,10 @@ ${note}`;
         const spamToggleAction = spamEnabled ? "sf_off" : "sf_on";
         const spamToggleText = spamEnabled ? "🗑️ 关闭垃圾消息拦截" : "🗑️ 开启垃圾消息拦截";
         rows.push([{ text: spamToggleText, callback_data: await makeData(spamToggleAction) }]);
+
+        const aiToggleAction = aiEnabled ? "ai_off" : "ai_on";
+        const aiToggleText = aiEnabled ? "🧠 关闭 AI 审查" : "🧠 开启 AI 审查";
+        rows.push([{ text: aiToggleText, callback_data: await makeData(aiToggleAction) }]);
 
         rows.push([{ text: "✏️ 编辑垃圾消息规则", callback_data: await makeData("sf_rules") }]);
 
@@ -5113,7 +5425,11 @@ async function handleSettingsCallback(callbackQuery, env, ctx) {
         const verifyModeText = getVerifyModeText(verifyMode);
         const spamEnabled = await getGlobalSpamFilterEnabled(env);
         const spamText = spamEnabled ? "✅ 已开启" : "⛔ 已关闭";
-        const aiText = hasGrokModerationConfig(env) ? "✅ 可用" : "⛔ 未配置";
+        const spamRules = await getGlobalSpamFilterRules(env);
+        const aiEnabled = !!(spamRules && spamRules.ai && spamRules.ai.enabled);
+        const aiText = aiEnabled
+            ? (hasGrokModerationConfig(env) ? "✅ 已开启（可用）" : "⚠️ 已开启（未配置）")
+            : "⛔ 已关闭";
 
         const tsText = hasTurnstileBinding(env) ? "✅ 已配置" : "⛔ 未配置";
 
@@ -5121,7 +5437,7 @@ async function handleSettingsCallback(callbackQuery, env, ctx) {
 
 机器人总开关：${statusText}
 垃圾消息拦截：${spamText}
-Grok 审核：${aiText}
+AI 审查：${aiText}
 Turnstile：${tsText}
 验证方式：${verifyModeText}
 
@@ -5276,18 +5592,44 @@ if (action === "v_q" || action === "v_t" || action === "v_off") {
         return;
     }
 
+    if (action === "ai_on" || action === "ai_off") {
+        const enabled = (action === "ai_on");
+        await setGlobalSpamAiEnabled(env, enabled);
+
+        const botEnabled = await isBotEnabled(env);
+        const text = enabled ? "✅ 开启" : "⛔ 关闭";
+        const note = enabled && !hasGrokModerationConfig(env)
+            ? "⚠️ 已开启 AI 审查，但当前未配置 Grok 接口参数，实际会仅使用本地规则。"
+            : `✅ 已切换 AI 审查为：${text}`;
+        const panel = await buildSettingsPanel(env, adminId, botEnabled, { note });
+
+        try {
+            await tgCall(env, "editMessageText", {
+                chat_id: chatId,
+                message_id: messageId,
+                text: panel.text,
+                parse_mode: "Markdown",
+                reply_markup: panel.reply_markup
+            });
+        } catch (_) {}
+
+        Logger.info('spam_ai_toggle_via_settings', { adminId, enabled });
+        return;
+    }
+
     if (action === "sf_rules") {
         // 发送“请回复提交 规则提示词”的提示，并记录编辑会话（v1.1.1b+）
         const currentRules = await getGlobalSpamFilterRules(env);
         const currentPrompt = await getGlobalSpamFilterRulesPrompt(env);
         const enabled = await getGlobalSpamFilterEnabled(env);
         const aiAvail = hasGrokModerationConfig(env);
+        const aiEnabled = !!(currentRules && currentRules.ai && currentRules.ai.enabled);
 
         const header = [
             "✏️ 编辑垃圾消息规则",
             "",
             `垃圾消息拦截：${enabled ? "✅ 已开启" : "⛔ 已关闭"}`,
-            `Grok 审核：${aiAvail ? "✅ 可用" : "⛔ 未配置（将无法调用 Grok 审核）"}`,
+            `AI 审查：${aiEnabled ? (aiAvail ? "✅ 已开启（可用）" : "⚠️ 已开启（未配置）") : "⛔ 已关闭"}`,
             "",
             "请【回复】本条消息，发送新的规则。",
             "每次提交会在现有规则基础上【追加】（不会删除旧项）。",
@@ -5301,6 +5643,7 @@ if (action === "v_q" || action === "v_t" || action === "v_off") {
             "block_re: /.../i   （屏蔽正则，支持 /pat/flags 或纯 pat）",
             "allow_re: /.../i   （放行正则）",
             "max_links=2        （按链接数量拦截，0-20，0表示无限制）",
+            "ai=off / ai=on     （关闭或开启 AI 审查；本地词库规则不受影响）",
             "不带任何前缀会直接当作【屏蔽关键词】添加（此时可用中文逗号或顿号分隔）。",
             "",
             "若需从空规则开始（去除默认规则）：请在任意一行单独写 清空默认 或 CLEAR_DEFAULTS",
@@ -7283,9 +7626,9 @@ async function handlePrivateMessage(msg, env, ctx, origin = null) {
         
         const pendingMsgId = msg.message_id;
 
-        // 未验证用户：若命中垃圾规则或 AI 判定为垃圾，则丢弃消息并提示用户（不触发转发，也不触发暂存）
+        // 未验证用户：只跑本地规则/词库，命中才丢弃；不调用 AI 审查。
         try {
-            const verdict = await classifySpamOptional(env, msg);
+            const verdict = await classifySpamOptional(env, msg, { allowAi: false });
             if (verdict && verdict.is_spam) {
                 await archiveSpamToRubbish(env, msg, userId, verdict);
                 await notifyUserSpamDropped(env, userId, msg, verdict);
@@ -7378,9 +7721,9 @@ if (pendingVerify) {
 
 // v1.2：暂存消息写入 pending_queue（跨会话保留）
 const msgId = msg.message_id;
- // 若命中垃圾规则或 AI 判定为垃圾，则丢弃消息并提示用户（不暂存）
+ // 验证期间只跑本地规则/词库，命中才丢弃；不调用 AI 审查。
  try {
-     const verdict = await classifySpamOptional(env, msg);
+     const verdict = await classifySpamOptional(env, msg, { allowAi: false });
      if (verdict && verdict.is_spam) {
          await archiveSpamToRubbish(env, msg, userId, verdict);
          await notifyUserSpamDropped(env, userId, msg, verdict);
@@ -8084,6 +8427,7 @@ let rawPrompt = (msg.text || "").replace(/\u200b/g, "").trim();
                     "✅ 已保存垃圾消息规则，立即生效。",
                     "",
                     `max_links=${saved.max_links}`,
+                    `ai=${saved.ai && saved.ai.enabled ? "on" : "off"}`,
                     "",
                     `block_keywords (${(saved.keywords || []).length}):`,
                     formatInlineList(saved.keywords),
